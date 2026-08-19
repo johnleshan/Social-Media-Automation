@@ -182,6 +182,10 @@ class App(tk.Tk):
         self._refresh_accounts()
         self.acct_combo.set(name)
         self._log("info", f"Account '{name}' created. A browser will open for one-time login.")
+        self._log(
+            "info",
+            "If two-step verification appears, complete it, then close the browser window.",
+        )
         profile = self.config.get_profile(name)
         t = threading.Thread(target=open_login, args=(profile["user_data_dir"], self.log_q.put), daemon=True)
         t.start()

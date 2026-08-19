@@ -30,6 +30,9 @@ editing to switch accounts.
    python -m playwright install chromium
    ```
 
+   Real Chrome is used automatically when installed (recommended — Facebook's
+   login and 2FA pages don't render properly in the bundled browser).
+
 2. **Put your media** in the `content/` folder (jpg, png, gif, webp, mp4, mov...).
 
 3. **Launch the tool:**
