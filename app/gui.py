@@ -40,6 +40,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._refresh_accounts()
+        self.keyword_var.set(self.config.get("last_keyword", ""))
         self.after(200, self._poll)
 
     # ---------- UI construction ----------
@@ -377,8 +378,7 @@ class App(tk.Tk):
         self.scan_btn.configure(state="disabled" if busy else "normal")
         self.stop_btn.configure(state="normal" if busy else "disabled")
         if busy:
-            stats = self.db.post_stats()
-            posted = stats.get("posted", 0)
+            posted = self.db.posts_today()
             self.status_lbl.configure(text=f"Running... {posted} posted today", foreground="#0b5394")
         else:
             self.status_lbl.configure(text="Idle", foreground="#666666")

@@ -17,6 +17,7 @@ from .approval import check_group
 from .browser import FacebookBrowser
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN
 from .discovery import search_groups
+from .poster import post_media
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".m4v"}
@@ -229,7 +230,7 @@ class Worker:
 
     def _post_one(self, g, file_path, caption):
         try:
-            status, message = __import__("app.poster", fromlist=["post_media"]).post_media(
+            status, message = post_media(
                 self.browser.page, g["id"], file_path, caption or self.config.settings.get("caption", ""),
                 self._emit,
             )

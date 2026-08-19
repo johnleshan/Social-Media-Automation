@@ -143,6 +143,14 @@ class Database:
             ).fetchall()
             return {r[0]: r[1] for r in row}
 
+    def posts_today(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM posts WHERE status='posted' AND created_at LIKE ?",
+                (f"{today}%",),
+            ).fetchone()[0]
+
     def recent_posts(self, limit=200):
         with self._lock:
             rows = self.conn.execute(
