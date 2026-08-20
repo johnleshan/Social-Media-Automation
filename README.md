@@ -41,9 +41,16 @@ editing to switch accounts.
    python main.py
    ```
 
-4. **Add an account:** click *Add Account*, name it (e.g. `main`). A browser
-   window opens — log into Facebook once, then close the window. Repeat for any
-   other accounts.
+4. **Add an account — easiest (recommended):** click **Import from Chrome**.
+   This copies your existing logged-in Facebook session from your normal
+   Chrome into the bot profile — no login screen involved. **Close Chrome
+   first**, then pick the account name and profile. The tool verifies the
+   session automatically.
+
+   *Alternative:* click **Add Account**, name it (e.g. `main`). A browser
+   window opens — log into Facebook once, then close the window. If Facebook
+   stalls after you enter your credentials, use **Import from Chrome** instead;
+   the in-app login can be blocked by Facebook's bot detection.
 
 ## Daily use
 
