@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Group Post Automator</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2 4 6v6c0 4.4 3.4 8.4 8 9 4.6-.6 8-4.6 8-9V6l-8-4z"/>
+          <path d="m9 12 2 2 4-4"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>Group Post Automator</h1>
+        <p>Local Facebook group automation</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div id="statusPill" class="pill idle">
+        <span class="dot"></span><span id="statusText">Connecting…</span>
+      </div>
+      <div class="chip" title="Posts marked as posted today">
+        <span class="chip-icon">▲</span><span id="postedChip">0</span> posted today
+      </div>
+      <button id="btnSettings" class="icon-btn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <!-- ============ STATUS BANNER ============ -->
+    <section id="banner" class="banner hidden" role="alert">
+      <div class="banner-icon" id="bannerIcon">!</div>
+      <div class="banner-body">
+        <div class="banner-title" id="bannerTitle">Notice</div>
+        <div class="banner-text" id="bannerText"></div>
+      </div>
+      <div class="banner-actions" id="bannerActions"></div>
+    </section>
+
+    <!-- ============ ACCOUNT BAR ============ -->
+    <section class="card account-bar">
+      <div class="card-head">
+        <h2>Account</h2>
+        <span class="card-sub">The Facebook profile the bot posts as</span>
+      </div>
+      <div class="account-controls">
+        <div class="field">
+          <label for="profileSelect">Profile</label>
+          <select id="profileSelect"></select>
+        </div>
+        <span id="accountChip" class="chip account-chip">—</span>
+        <div class="account-btns">
+          <button id="btnAddAccount" class="btn ghost" title="Create a new account and open a browser to log in once">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Add Account
+          </button>
+          <button id="btnImport" class="btn outline" title="Copy your already-logged-in Chrome session">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+            <span class="lbl">Import from Chrome</span>
+          </button>
+          <button id="btnVerify" class="btn outline" title="Open a headless browser and confirm the selected account is logged in">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <span class="lbl">Check session</span>
+          </button>
+          <button id="btnManage" class="btn outline" title="Re-login, import or remove accounts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>
+            Manage
+          </button>
+        </div>
+      </div>
+      <div class="account-detail" id="acctDetail"></div>
+    </section>
+
+    <!-- ============ MAIN GRID ============ -->
+    <div class="grid">
+
+      <!-- ------------ LEFT COLUMN ------------ -->
+      <div class="col">
+
+        <!-- Discovery -->
+        <section class="card">
+          <div class="card-head">
+            <h2>Group Discovery</h2>
+            <span class="card-sub">Find new groups to classify and post into</span>
+          </div>
+          <div class="field">
+            <label for="keywordInput">Search / keyword</label>
+            <input id="keywordInput" type="text" placeholder="e.g. investments kenya — leave empty to check unclassified groups">
+          </div>
+          <div class="field-row">
+            <div class="field grow">
+              <label>Filter mode</label>
+              <div class="seg" id="modeSeg">
+                <input type="radio" name="mode" id="modeSearch" value="search" checked>
+                <label for="modeSearch">Search</label>
+                <input type="radio" name="mode" id="modeHard" value="hard">
+                <label for="modeHard">Hard filter</label>
+              </div>
+            </div>
+            <div class="field w140">
+              <label for="minMembers">Min members</label>
+              <input id="minMembers" type="number" min="0" step="100" value="0">
+            </div>
+          </div>
+          <div class="field">
+            <button id="btnScan" class="btn primary wide">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              Scan Groups
+            </button>
+            <p class="hint">Hard filter keeps only groups whose <em>name</em> contains the keyword and that meet the member minimum. Empty keyword = re-check unclassified groups.</p>
+          </div>
+        </section>
+
+        <!-- Content -->
+        <section class="card">
+          <div class="card-head">
+            <h2>Content</h2>
+            <span class="card-sub">What gets posted and with what caption</span>
+          </div>
+          <div class="field">
+            <label for="mediaFolder">Media folder</label>
+            <div class="input-btn">
+              <input id="mediaFolder" type="text" placeholder="content" spellcheck="false">
+              <button id="btnBrowseFolder" class="btn outline" title="Browse folders on this PC">Browse…</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="captionInput">Caption</label>
+            <input id="captionInput" type="text" placeholder="Optional caption added to every post" spellcheck="true">
+          </div>
+        </section>
+      </div>
+
+      <!-- ------------ RIGHT COLUMN ------------ -->
+      <div class="col">
+
+        <!-- Run -->
+        <section class="card run-card">
+          <div class="card-head">
+            <h2>Run</h2>
+            <span class="card-sub" id="runSub">Posting engine</span>
+          </div>
+          <div class="run-buttons">
+            <button id="btnStart" class="btn success grow">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              Start Posting
+            </button>
+            <button id="btnStop" class="btn danger" disabled>
+              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+              Stop
+            </button>
+          </div>
+          <div class="run-status" id="runStatus">Idle</div>
+          <div class="recent" id="recentList">
+            <div class="recent-empty">No posts yet this session.</div>
+          </div>
+        </section>
+
+        <!-- Overview -->
+        <section class="stats">
+          <div class="stat">
+            <span class="stat-value accent" id="statPostedToday">0</span>
+            <span class="stat-label">Posted today</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statTotalPosted">0</span>
+            <span class="stat-label">Total posted</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value green" id="statSafe">0</span>
+            <span class="stat-label">Safe groups</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value amber" id="statSkip">0</span>
+            <span class="stat-label">Approval / skip</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value blue" id="statReview">0</span>
+            <span class="stat-label">In review</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statMedia">0</span>
+            <span class="stat-label">Media files</span>
+          </div>
+        </section>
+
+        <!-- Log -->
+        <section class="card log-card">
+          <div class="card-head">
+            <h2>Live Activity</h2>
+            <span class="card-sub" id="logCount">0 lines</span>
+            <button id="btnClearLog" class="btn ghost small" title="Clear the log">Clear</button>
+          </div>
+          <div id="logPanel" class="log">
+            <div class="log-empty">Waiting for activity…</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- ============ GROUPS ============ -->
+    <section class="card groups-card">
+      <div class="card-head">
+        <h2>Groups</h2>
+        <span class="card-sub">Classify groups before the bot posts to them</span>
+        <div class="head-spacer"></div>
+        <button id="btnRefreshGroups" class="btn ghost small" title="Reload the group list">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+          Refresh
+        </button>
+      </div>
+      <div class="tabs" id="groupTabs">
+        <button class="tab active" data-status="safe">Safe Groups <span class="badge" id="badgeSafe">0</span></button>
+        <button class="tab" data-status="skip">Skip (approval) <span class="badge" id="badgeSkip">0</span></button>
+        <button class="tab" data-status="unknown">Review <span class="badge" id="badgeUnknown">0</span></button>
+      </div>
+      <div class="table-wrap">
+        <table class="groups">
+          <thead>
+            <tr>
+              <th>Group</th>
+              <th class="num">Members</th>
+              <th>Signal</th>
+              <th class="num">Times posted</th>
+              <th>Last posted</th>
+              <th class="actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="groupsBody">
+            <tr><td colspan="6" class="empty-cell" id="groupsEmpty">No groups yet. Run a scan to discover and classify groups.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" id="groupsHint">Safe = posts publish immediately · Skip = posts go to admin approval (never auto-posted) · Review = couldn't be classified yet. Select a row and use the actions to re-classify.</p>
+    </section>
+
+    <footer class="footer">
+      Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app.
+    </footer>
+  </main>
+</div>
+
+<!-- ============ SETTINGS MODAL ============ -->
+<div class="modal" id="modalSettings" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Settings</h3>
+      <button class="icon-btn" data-close="modalSettings">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field"><label for="setDelayMin">Min delay (sec)</label><input id="setDelayMin" type="number" min="30" step="30"></div>
+        <div class="field"><label for="setDelayMax">Max delay (sec)</label><input id="setDelayMax" type="number" min="30" step="30"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="setSoftCap">Daily soft cap (0 = off)</label><input id="setSoftCap" type="number" min="0" step="10"></div>
+        <div class="field"><label for="setMaxCycle">Max posts per cycle (0 = off)</label><input id="setMaxCycle" type="number" min="0" step="1"></div>
+      </div>
+      <label class="switch-row">
+        <span>Hidden (headless) mode</span>
+        <span class="switch"><input type="checkbox" id="setHeadless"><i></i></span>
+      </label>
+      <label class="switch-row">
+        <span>Re-check unclassified groups on start</span>
+        <span class="switch"><input type="checkbox" id="setScanOnStart"><i></i></span>
+      </label>
+      <p class="hint">Delays are the random wait between posts. The soft cap pauses posting for the rest of the day once reached.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="modalSettings">Cancel</button>
+      <button class="btn primary" id="btnSaveSettings">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADD ACCOUNT MODAL ============ -->
+<div class="modal" id="modalAdd" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Add Account</h3>
+      <button class="icon-btn" data-close="modalAdd">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="addName">Account name</label>
+        <input id="addName" type="text" placeholder="e.g. main, work">
+      </div>
+      <p class="hint">A visible browser window will open for a one-time Facebook login. Complete login (including any two-step verification), then close the window. The session is verified automatically.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="modalAdd">Cancel</button>
+      <button class="btn primary" id="btnConfirmAdd">Create &amp; open browser</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ IMPORT FROM CHROME MODAL ============ -->
+<div class="modal" id="modalImport" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Import from Chrome</h3>
+      <button class="icon-btn" data-close="modalImport">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="chromeStatus" class="inline-note"></div>
+      <div class="field">
+        <label for="importProfile">Chrome profile to copy</label>
+        <select id="importProfile"></select>
+      </div>
+      <div class="field">
+        <label for="importName">Account name for this session</label>
+        <input id="importName" type="text" placeholder="e.g. main">
+      </div>
+      <p class="hint"><strong>Tip:</strong> close Chrome fully first for a clean copy — the cookies file can't be copied while Chrome is running.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" data-close="modalImport">Cancel</button>
+      <button class="btn primary" id="btnConfirmImport">Import &amp; verify</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ MANAGE ACCOUNTS MODAL ============ -->
+<div class="modal" id="modalAccounts" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Manage Accounts</h3>
+      <button class="icon-btn" data-close="modalAccounts">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="accountsList" class="accounts-list"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btnAccountsAdd">Add Account…</button>
+      <button class="btn primary" data-close="modalAccounts">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ FOLDER BROWSER MODAL ============ -->
+<div class="modal" id="modalBrowse" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Choose Media Folder</h3>
+      <button class="icon-btn" data-close="modalBrowse">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="browse-path" id="browsePath">/</div>
+      <div id="browseDirs" class="browse-dirs"></div>
+      <p class="hint" id="browseHint">Click a folder to open it, then choose it below.</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btnBrowseUp">Up one level</button>
+      <div class="head-spacer"></div>
+      <button class="btn ghost" data-close="modalBrowse">Cancel</button>
+      <button class="btn primary" id="btnBrowseSelect">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- toast -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

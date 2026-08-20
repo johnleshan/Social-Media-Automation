@@ -5,6 +5,13 @@ and videos to Facebook groups you're a member of. Runs from your own machine
 using your real logged-in Facebook session — no cloud, no API keys, no code
 editing to switch accounts.
 
+## Interface
+
+The app opens a **modern web dashboard** in your browser (`python main.py`).
+Everything is controlled from there — accounts, discovery, posting, live log
+and group review. Legacy modes stay available: `python main.py --gui` (desktop
+Tkinter) and `python main.py --cli` (console).
+
 ## What it does
 
 - **Account plug-in** — each account is a Chrome profile. Log in once through

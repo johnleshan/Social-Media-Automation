@@ -1,13 +1,21 @@
-"""Entry point. Launches the GUI by default; supports a minimal CLI mode."""
+"""Entry point.
+
+Default: starts the local web UI and opens the browser.
+  --gui : legacy Tkinter desktop UI.
+  --cli : minimal console mode (prompts, runs until Ctrl+C).
+"""
 import sys
 
 
 def main():
     if "--cli" in sys.argv:
         run_cli()
-    else:
+    elif "--gui" in sys.argv:
         from app.gui import run_gui
         run_gui()
+    else:
+        from app.webserver import run_web_ui
+        run_web_ui()
 
 
 def run_cli():
