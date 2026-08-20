@@ -142,7 +142,8 @@ class Worker:
                 )
             except Exception as e:
                 self._emit(f"Search failed: {e}")
-                candidates = []
+                self._emit("Scan aborted. Fix the issue above, then scan again.")
+                return
             for c in candidates:
                 self.db.upsert_group(c["id"], c["name"], c["member_count"], c["url"])
         else:

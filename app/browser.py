@@ -226,7 +226,12 @@ class FacebookBrowser:
         return self.page
 
     def is_logged_in(self, timeout_ms=30000):
-        """Best-effort check that we have a working Facebook session."""
+        """True only when a real Facebook session exists (c_user cookie).
+
+        The `c_user` cookie is Facebook's definitive logged-in marker. URL
+        checks are unreliable because Facebook renders its login form at "/"
+        without redirecting.
+        """
         if self.page is None:
             return False
         try:
@@ -235,10 +240,16 @@ class FacebookBrowser:
                 timeout=timeout_ms,
             )
             self.page.wait_for_timeout(2500)
-            url = self.page.url
-            return not ("/login" in url or "login.php" in url or "two_step" in url)
         except Exception:
             return False
+        try:
+            cookies = self.context.cookies()
+            for c in cookies:
+                if c["name"] == "c_user" and c.get("value"):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def close(self):
         try:

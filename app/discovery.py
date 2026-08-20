@@ -81,16 +81,54 @@ def _collect_links(page, max_scrolls=8, scroll_wait=1200):
     return list(seen.values())
 
 
+LOGIN_WALL_PHRASES = [
+    "log in to facebook",
+    "email address or mobile number",
+    "create new account",
+    "forgotten password",
+]
+NOT_FOUND_PHRASES = ["not found", "content isn't available"]
+
+
+def _body_text(page):
+    try:
+        return (page.inner_text("body") or "")[:4000]
+    except Exception:
+        return ""
+
+
 def search_groups(page, query, filter_mode="search", min_members=0, log=None):
-    """Return a list of candidate group dicts matching the query/filter."""
+    """Return a list of candidate group dicts matching the query/filter.
+
+    Raises RuntimeError with an actionable message when the search cannot run
+    (session not logged in, or Facebook returned a blocked/404 page) instead of
+    silently returning zero groups.
+    """
     log = log or (lambda msg: print(msg))
     query = (query or "").strip()
     if not query:
         return []
     url = SEARCH_URL.format(query=quote_plus(query))
     log(f"Searching groups for: {query}")
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        raise RuntimeError(f"search page would not load: {e}")
     page.wait_for_timeout(4000)
+
+    body = _body_text(page)
+    low = body.lower()
+    if any(p in low for p in LOGIN_WALL_PHRASES):
+        raise RuntimeError(
+            "Facebook is showing the login page. The account session is not "
+            "logged in. Log in and re-check the session, then scan again."
+        )
+    if any(p in low for p in NOT_FOUND_PHRASES) or page.title() == "":
+        raise RuntimeError(
+            "Facebook returned 'Not Found' for the search page. The session "
+            "may be logged out or rate-limited. Re-check the session and retry."
+        )
+
     candidates = _collect_links(page)
 
     if filter_mode == "hard":
