@@ -11,7 +11,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from .browser import open_login
+from .browser import open_login, find_chrome_user_data_dir, import_chrome_session, list_chrome_profiles
 from .config import Config
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, Database
 from .worker import Worker
@@ -56,6 +56,7 @@ class App(tk.Tk):
         self.acct_combo = ttk.Combobox(acct, state="readonly", width=24)
         self.acct_combo.pack(side="left", **pad)
         ttk.Button(acct, text="Add Account", command=self.add_account).pack(side="left", **pad)
+        ttk.Button(acct, text="Import from Chrome", command=self.import_from_chrome).pack(side="left", **pad)
         ttk.Button(acct, text="Manage Accounts", command=self.manage_accounts).pack(side="left", **pad)
 
         # Discovery
@@ -194,11 +195,12 @@ class App(tk.Tk):
         names = [p["name"] for p in self.config.profiles]
         win = tk.Toplevel(self)
         win.title("Manage Accounts")
-        win.geometry("320x280")
+        win.geometry("340x300")
         lb = tk.Listbox(win)
         lb.pack(fill="both", expand=True, padx=8, pady=8)
         for n in names:
             lb.insert("end", n)
+
         def remove():
             sel = lb.curselection()
             if not sel:
@@ -208,6 +210,7 @@ class App(tk.Tk):
                 self.config.remove_profile(n)
                 self._refresh_accounts()
                 win.destroy()
+
         def relogin():
             sel = lb.curselection()
             if not sel:
@@ -216,11 +219,104 @@ class App(tk.Tk):
             profile = self.config.get_profile(n)
             t = threading.Thread(target=open_login, args=(profile["user_data_dir"], self.log_q.put), daemon=True)
             t.start()
-        ttk.Button(win, text="Re-login", command=relogin).pack(side="left", padx=8)
+
+        def imp():
+            win.destroy()
+            self.import_from_chrome()
+
+        ttk.Button(win, text="Re-login (open login window)", command=relogin).pack(side="left", padx=8)
+        ttk.Button(win, text="Import from Chrome", command=imp).pack(side="left", padx=8)
         ttk.Button(win, text="Remove", command=remove).pack(side="left", padx=8)
         ttk.Button(win, text="Close", command=win.destroy).pack(side="right", padx=8)
 
-    # ---------- actions ----------
+    def import_from_chrome(self):
+        chrome_dir = find_chrome_user_data_dir()
+        if not chrome_dir:
+            messagebox.showerror(
+                "Import from Chrome",
+                "Could not find a Chrome/Edge user-data folder. "
+                "Make sure Chrome is installed and has been used at least once.",
+            )
+            return
+        profiles = list_chrome_profiles(chrome_dir)
+        if not profiles:
+            messagebox.showerror("Import from Chrome", "No Chrome profiles found.")
+            return
+
+        name = simpledialog.askstring("Import from Chrome", "Account name (e.g. main):")
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            return
+
+        if len(profiles) == 1:
+            chosen = profiles[0]
+        else:
+            pick = tk.Toplevel(self)
+            pick.title("Choose Chrome profile")
+            pick.geometry("320x160")
+            ttk.Label(pick, text="Which Chrome profile has the account?").pack(padx=8, pady=8)
+            var = tk.StringVar(value=profiles[0])
+            combo = ttk.Combobox(pick, textvariable=var, values=profiles, state="readonly")
+            combo.pack(padx=8, pady=4)
+            result = {}
+
+            def ok():
+                result["profile"] = var.get()
+                pick.destroy()
+
+            ttk.Button(pick, text="Use this profile", command=ok).pack(pady=8)
+            self.wait_window(pick)
+            if "profile" not in result:
+                return
+            chosen = result["profile"]
+
+        if messagebox.askyesno(
+            "Import from Chrome",
+            "Tip: close Chrome fully first for a clean copy.\n"
+            f"Import profile '{chosen}' into account '{name}'?",
+        ):
+            self._log("info", f"Importing Chrome profile '{chosen}' into '{name}'...")
+            self.config.add_profile(name)
+            profile = self.config.get_profile(name)
+
+            def job():
+                try:
+                    import_chrome_session(
+                        profile["user_data_dir"], chrome_dir, chosen, self.log_q.put
+                    )
+                except Exception as e:
+                    self.log_q.put(f"Import failed: {e}")
+                    return
+                cookies = os.path.join(profile["user_data_dir"], "Default", "Network", "Cookies")
+                if not os.path.exists(cookies):
+                    self.log_q.put(
+                        "IMPORTANT: Chrome's cookie file could not be copied because "
+                        "Chrome is still open. Close Chrome fully, then run Import "
+                        "again for this account."
+                    )
+                    return
+                self.log_q.put("Import done. Verifying the session...")
+                try:
+                    from .browser import FacebookBrowser
+                    fb = FacebookBrowser(profile["user_data_dir"], headless=True, log=self.log_q.put)
+                    fb.launch()
+                    ok = fb.is_logged_in(timeout_ms=45000)
+                    fb.close()
+                    self.log_q.put(
+                        "Session verified: logged in. You can start posting."
+                        if ok else
+                        "Imported, but the session is not logged into Facebook."
+                    )
+                except Exception as e:
+                    self.log_q.put(f"Verification error: {e}")
+
+            t = threading.Thread(target=job, daemon=True)
+            t.start()
+            self._refresh_accounts()
+            self.acct_combo.set(name)
+
     def browse_folder(self):
         d = filedialog.askdirectory()
         if d:

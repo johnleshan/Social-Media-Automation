@@ -9,6 +9,7 @@ Uses real installed Chrome when available (Facebook's login / 2FA pages hang
 in Playwright's bundled Chromium), falling back to bundled Chromium otherwise.
 """
 import os
+import shutil
 import time
 
 from playwright.sync_api import sync_playwright
@@ -54,6 +55,121 @@ def _resolve_channel():
     if any(os.path.exists(p) for p in EDGE_EXES):
         return "msedge"
     return None
+
+
+# --- importing an existing logged-in Chrome session -------------------------
+CHROME_USER_DATA_DIRS = [
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data"),
+    os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
+]
+
+# Subfolders that are pure cache / not needed for a working session.
+SKIP_DIR_NAMES = {
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "DawnGraphiteCache",
+    "DawnWebGPUCache", "ShaderCache", "component_crx_cache",
+    "extensions_crx_cache", "Crashpad", "Safe Browsing", "Segmentation Platform",
+    "Shared Dictionary", "blob_storage", "Sync Data", "WebStorage",
+    "AutofillAiModelCache", "optimization_guide_model_store", "BrowserMetrics",
+    "InterestGroups", "DIPS", "Windows",
+}
+# Files that are locks/singletons or unneeded bulk.
+SKIP_FILE_NAMES = {
+    "LOCK", "LOG", "SingletonLock", "SingletonCookie", "SingletonSocket",
+    "History", "History-journal", "Top Sites", "Top Sites-journal",
+    "Favicons", "Favicons-journal", "Web Data", "Web Data-journal",
+    "Last Session", "Last Tabs", "Current Session", "Current Tabs",
+    "First Run",
+}
+
+# File/dir names that must NEVER be copied (must always be in the skip set).
+FORCED_SKIP = {"SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"}
+
+
+def find_chrome_user_data_dir():
+    for d in CHROME_USER_DATA_DIRS:
+        if os.path.isdir(d):
+            return d
+    return None
+
+
+def list_chrome_profiles(user_data_dir):
+    """Return profile directory names found under a Chrome user-data-dir."""
+    profiles = []
+    if not user_data_dir or not os.path.isdir(user_data_dir):
+        return profiles
+    for entry in sorted(os.listdir(user_data_dir)):
+        full = os.path.join(user_data_dir, entry)
+        if os.path.isdir(full) and os.path.exists(os.path.join(full, "Preferences")):
+            if entry == "Default" or entry.startswith("Profile "):
+                profiles.append(entry)
+    return profiles
+
+
+def _skip_copytree(src, dst, log=None, skip_names=None):
+    """Copy a profile tree, skipping caches/locks and tolerating locked files.
+
+    Returns a list of files that could not be copied (typically because Chrome
+    is still running and holding them open).
+    """
+    skip_names = skip_names or set()
+    skipped_locked = []
+    if os.path.exists(dst):
+        shutil.rmtree(dst, ignore_errors=True)
+    os.makedirs(dst, exist_ok=True)
+    skip_dirs = {s.lower() for s in SKIP_DIR_NAMES} | {s.lower() for s in skip_names}
+    skip_files = {s.lower() for s in SKIP_FILE_NAMES} | {s.lower() for s in skip_names}
+
+    for root, dirs, names in os.walk(src):
+        rel = os.path.relpath(root, src)
+        dest_root = dst if rel == "." else os.path.join(dst, rel)
+        dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+        os.makedirs(dest_root, exist_ok=True)
+        for name in names:
+            if name.lower() in skip_files:
+                continue
+            src_file = os.path.join(root, name)
+            dst_file = os.path.join(dest_root, name)
+            try:
+                shutil.copy2(src_file, dst_file)
+            except OSError as e:
+                skipped_locked.append(src_file)
+                if log:
+                    log(f"skipped locked file (close Chrome for a complete copy): {src_file} ({e})")
+    return skipped_locked
+
+
+def import_chrome_session(dest_user_data_dir, chrome_user_data_dir, profile_dir, log=None):
+    """Copy a logged-in Chrome profile into the bot's profile folder.
+
+    Copies the profile (minus caches/locks) plus the top-level Local State so
+    cookies keep working on this machine. Same-machine/OS-user only.
+    """
+    log = log or (lambda msg: print(msg))
+    src_profile = os.path.join(chrome_user_data_dir, profile_dir)
+    local_state = os.path.join(chrome_user_data_dir, "Local State")
+    if not os.path.isdir(src_profile):
+        raise FileNotFoundError(f"Chrome profile not found: {src_profile}")
+
+    os.makedirs(dest_user_data_dir, exist_ok=True)
+    # Clean any previous copy so stale files never linger.
+    old_default = os.path.join(dest_user_data_dir, "Default")
+    if os.path.isdir(old_default):
+        shutil.rmtree(old_default, ignore_errors=True)
+
+    if os.path.exists(local_state):
+        shutil.copy2(local_state, os.path.join(dest_user_data_dir, "Local State"))
+
+    log(f"Copying Chrome profile '{profile_dir}' -> bot profile...")
+    skipped = _skip_copytree(
+        src_profile, os.path.join(dest_user_data_dir, "Default"), log=log
+    )
+    if skipped:
+        log(
+            f"WARNING: {len(skipped)} file(s) could not be copied because Chrome "
+            "is running. Close Chrome and import again for a complete session."
+        )
+    log("Profile copied.")
+    return skipped
 
 
 class FacebookBrowser:
@@ -140,11 +256,12 @@ class FacebookBrowser:
         self._pw = None
 
 
-def open_login(user_data_dir, log=None):
+def open_login(user_data_dir, log=None, verify=True):
     """Open a visible browser for one-time Facebook login into a profile.
 
     Blocks while the user logs in (including completing two-step verification
-    if asked). Returns after the user closes the window.
+    if asked). Returns after the user closes the window. If verify is True, a
+    quick headless check confirms the saved session afterwards.
     """
     log = log or (lambda msg: print(msg))
     os.makedirs(user_data_dir, exist_ok=True)
@@ -161,6 +278,7 @@ def open_login(user_data_dir, log=None):
     if channel:
         try:
             context = pw.chromium.launch_persistent_context(channel=channel, **kwargs)
+            log(f"Using real {channel.capitalize()} session.")
         except Exception:
             context = None
     if context is None:
@@ -172,11 +290,30 @@ def open_login(user_data_dir, log=None):
         "verification appears, complete it. Then close the window."
     )
     page.goto("https://www.facebook.com/login/", wait_until="domcontentloaded", timeout=60000)
+    # Heartbeat: report the URL every 5s so a stuck step is visible in the log.
+    import threading
+    stop_beat = threading.Event()
+
+    def heartbeat():
+        try:
+            while not stop_beat.is_set() and context.pages and not context.pages[0].is_closed():
+                try:
+                    u = page.url
+                    if u and "facebook.com" in u:
+                        log(f"[page] {u}")
+                except Exception:
+                    pass
+                time.sleep(5)
+        except Exception:
+            pass
+
+    threading.Thread(target=heartbeat, daemon=True).start()
     try:
         while context.pages and not context.pages[0].is_closed():
             time.sleep(1)
     except Exception:
         pass
+    stop_beat.set()
     try:
         context.close()
     except Exception:
@@ -186,3 +323,14 @@ def open_login(user_data_dir, log=None):
     except Exception:
         pass
     log("Login window closed.")
+    if verify:
+        fb = FacebookBrowser(user_data_dir, headless=True, log=log)
+        try:
+            fb.launch()
+            ok = fb.is_logged_in(timeout_ms=30000)
+            log("Session verified: logged in." if ok else
+                "Session NOT logged in yet. Try again or import your Chrome profile.")
+        except Exception as e:
+            log(f"Could not verify session: {e}")
+        finally:
+            fb.close()
