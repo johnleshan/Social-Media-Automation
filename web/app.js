@@ -10,10 +10,14 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const state = {
   lastLogId: 0,
   current: null,
-  groupStatus: "safe",
+  groupStatus: "all",
   lastAutoVerify: null,
   logLines: 0,
   recentTimer: 0,
+  activeTab: null,
+  prevBusy: false,
+  unseenLogCount: 0,
+  toastFiredFor: null,
 };
 
 /* ---------------- helpers ---------------- */
@@ -52,16 +56,22 @@ async function api(path, opts = {}) {
   if (!res.ok) throw new Error("HTTP " + res.status + " " + path);
   return res.json();
 }
-let toastTimer = 0;
 function toast(text, level = "info") {
-  const el = $("#toast");
-  el.textContent = text;
+  const container = $("#toastContainer");
+  const el = document.createElement("div");
   el.className = "toast " + level;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.classList.add("hidden"); }, 4200);
+  el.textContent = text;
+  el.addEventListener("click", () => el.remove());
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 200); }, 5500);
 }
 function openModal(id) { $('#' + id).removeAttribute("hidden"); }
 function closeModal(id) { $('#' + id).setAttribute("hidden", ""); }
+
+/* ---------------- teleport: switch to a tab after starting an action ---------------- */
+function teleport(tabName) {
+  switchTab(tabName);
+}
 
 /* ---------------- polling ---------------- */
 async function poll() {
@@ -70,11 +80,19 @@ async function poll() {
       api("/api/state"),
       api("/api/logs?since=" + state.lastLogId),
     ]);
+    const wasBusy = state.prevBusy;
+    const nowBusy = st.busy;
     state.current = st;
     if (logs.lines && logs.lines.length) {
       appendLogs(logs.lines);
       state.lastLogId = logs.lines[logs.lines.length - 1].id;
     }
+    // completion toast on busy -> idle transition (use last_result from backend)
+    if (wasBusy && !nowBusy) {
+      showCompletionToast(st);
+      state.toastFiredFor = null;
+    }
+    state.prevBusy = nowBusy;
     render();
   } catch (e) {
     console.error("poll failed", e);
@@ -91,19 +109,27 @@ function render() {
 
   // topbar
   if (st.busy) {
-    const pill = st.job === "scan" ? "scanning" : "running";
+    const pill = st.job === "scan" ? "scanning" : st.job === "check" ? "checking" : "running";
     $("#statusPill").className = "pill " + pill;
     $("#statusText").textContent =
-      st.job === "scan" ? "Scanning groups…" : `Running… ${st.posts_today} posted today`;
+      st.status_text
+      || (st.job === "scan" ? "Scanning groups…"
+      : st.job === "join" ? "Auto-joining groups…"
+      : st.job === "check" ? "Checking join status…"
+      : `Running… ${st.posts_today} posted today`);
   } else {
     $("#statusPill").className = "pill idle";
-    $("#statusText").textContent = "Idle";
+    const lr = st.last_result;
+    $("#statusText").textContent = lr ? lr.title : "Idle";
   }
   $("#postedChip").textContent = st.posts_today;
 
   // accounts
   renderAccountBar(st);
+  renderAccountsOverview(st);
   renderBanner(st);
+  renderResumeBanner(st);
+  renderHardStopBanner(st);
 
   // stats
   $("#statPostedToday").textContent = st.posts_today;
@@ -115,6 +141,25 @@ function render() {
   $("#badgeSafe").textContent = st.group_counts.safe;
   $("#badgeSkip").textContent = st.group_counts.skip;
   $("#badgeUnknown").textContent = st.group_counts.unknown;
+  if ($("#badgeAll")) $("#badgeAll").textContent = st.group_counts.total;
+
+  // join-limit indicator (Groups tab) — always visible so the user knows where they stand
+  const jl = $("#joinLimitStatus");
+  const jlEl = $("#joinLimitText");
+  if (jl && jlEl) {
+    const jt = st.join_today ?? 0;
+    const cap = st.hard_stop?.cap ?? 10;
+    const left = Math.max(0, cap - jt);
+    const hit = left <= 0 || (st.hard_stop && (st.hard_stop.joined ?? 0) >= cap);
+    jl.classList.remove("hidden");
+    if (hit) {
+      jl.className = "join-limit limit-hit";
+      jlEl.textContent = `Today's join cap reached (${Math.max(jt, st.hard_stop?.joined ?? 0)}/${cap}) - resume tomorrow`;
+    } else {
+      jl.className = "join-limit";
+      jlEl.textContent = `${left} of ${cap} safe joins left today`;
+    }
+  }
 
   // run controls
   const busy = st.busy;
@@ -122,17 +167,33 @@ function render() {
   const opRunning = busy || st.login.running || st.import.running || st.verify.running;
   $("#btnStart").disabled = opRunning || noProfile;
   $("#btnScan").disabled = opRunning || noProfile;
+  $("#btnJoinAll").disabled = opRunning || noProfile;
+  $("#btnCheckJoin").disabled = opRunning || noProfile;
   $("#btnStop").disabled = !busy;
+  const btnPause = $("#btnPause");
+  btnPause.disabled = !busy;
+  if (busy && st.paused) {
+    btnPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Resume';
+    btnPause.className = "btn success";
+  } else {
+    btnPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg> Pause';
+    btnPause.className = "btn outline";
+  }
   $("#btnVerify").disabled = opRunning || noProfile;
   $("#btnImport").disabled = opRunning;
 
   const run = $("#runStatus");
   if (busy) {
     run.className = "run-status running";
-    run.textContent = st.job === "scan"
-      ? "Scanning groups… (stop available)"
-      : `Posting… ${st.posts_today} posted today. Press Stop when done.`;
-  } else if (st.import.running) {
+    if (st.paused) {
+      run.textContent = "Paused — press Resume to continue, or Stop to end.";
+    } else {
+      run.textContent = st.status_text
+        || (st.job === "scan" ? "Scanning groups… (stop available)"
+        : st.job === "join" ? "Auto-joining groups… (stop available)"
+        : st.job === "check" ? "Checking join status… (stop available)"
+        : `Posting… ${st.posts_today} posted today. Press Stop when done.`);
+    }  } else if (st.import.running) {
     run.className = "run-status";
     run.textContent = "Importing Chrome session…";
   } else if (st.login.running) {
@@ -146,8 +207,49 @@ function render() {
     run.textContent = "Idle — ready when you are.";
   }
 
+  // activity controls bar
+  const acBar = $("#activityControls");
+  const grpBar = $("#groupsRunControls");
+  if (busy) {
+    acBar.classList.remove("hidden");
+    const pill = $("#acPill");
+    pill.className = "pill " + (st.paused ? "idle" : "running");
+    pill.textContent = st.paused ? "Paused" : (st.job === "scan" ? "Scanning" : st.job === "join" ? "Joining" : st.job === "check" ? "Checking" : "Running");
+    $("#acText").textContent = st.status_text || "Working…";
+    const acPause = $("#btnAcPause");
+    if (st.paused) {
+      acPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Resume';
+      acPause.className = "btn success small";
+    } else {
+      acPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg> Pause';
+      acPause.className = "btn outline small";
+    }
+    // Groups-tab compact controls mirror the same state
+    if (grpBar) {
+      grpBar.classList.remove("hidden");
+      $("#grpPill").className = "pill " + (st.paused ? "idle" : "running");
+      $("#grpPill").textContent = st.paused ? "Paused" : "Working";
+      $("#grpText").textContent = st.status_text || "Working…";
+      const grpPause = $("#btnGrpPause");
+      if (st.paused) {
+        grpPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg> Resume';
+        grpPause.className = "btn success small";
+      } else {
+        grpPause.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg> Pause';
+        grpPause.className = "btn outline small";
+      }
+    }
+  } else {
+    acBar.classList.add("hidden");
+    if (grpBar) grpBar.classList.add("hidden");
+  }
+
   renderRecent();
   maybeAutoVerify(st);
+
+  // tab rendering
+  renderTabs();
+  renderStepper(st);
 
   // groups refresh (only if tab visible & every ~4s)
   if (!document.hidden && !state.groupTimer) {
@@ -188,10 +290,301 @@ function renderAccountBar(st) {
     chip.className = "chip account-chip " + code;
     chip.textContent = ps.label;
     const extra = ps.detail ? " · " + ps.detail : "";
-    $("#acctDetail").textContent = `Profile folder on disk: ${ps.dir_exists ? "found" : "missing"}` + extra;
+    const setupTxt = ps.setup_total ? ` · Setup: ${ps.ready_count}/${ps.setup_total}${ps.ready ? " ✓" : ""}` : "";
+    $("#acctDetail").textContent = `Profile folder on disk: ${ps.dir_exists ? "found" : "missing"}` + extra + setupTxt;
   }
   $("#btnVerify .lbl").textContent = st.verify.running ? "Checking…" : "Check session";
   $("#btnImport .lbl").textContent = st.import.running ? "Importing…" : "Import from Chrome";
+}
+
+function renderAccountsOverview(st) {
+  const box = $("#acctOverview");
+  const profiles = st.profiles || [];
+  const selName = st.selected ? st.selected.name : "";
+  const readyN = profiles.filter((p) => p.status && p.status.ready).length;
+  $("#acctSummary").textContent = profiles.length
+    ? `${readyN} of ${profiles.length} account${profiles.length === 1 ? "" : "s"} ready` +
+      (readyN === profiles.length ? " — all set up" : " — see what's missing below")
+    : "Setup status at a glance";
+  box.innerHTML = "";
+  if (!profiles.length) {
+    box.innerHTML = '<div class="recent-empty">No accounts yet. Add one to get started.</div>';
+    return;
+  }
+  profiles.forEach((p) => {
+    const ps = p.status || { label: "—", code: "", setup: [], ready_count: 0, setup_total: 0 };
+    const row = document.createElement("div");
+    row.className = "acct-row" + (p.name === selName ? " selected" : "");
+    const checks = (ps.setup || []).map((c) => `
+      <span class="check ${c.ok ? "ok" : "bad"}" title="${esc(c.label)} — ${esc(c.hint)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">${c.ok ? '<path d="M20 6 9 17l-5-5"/>' : '<path d="M18 6 6 18M6 6l12 12"/>'}</svg>
+        <em>${esc(c.label)}</em>
+      </span>`).join("");
+    const meter = ps.setup_total
+      ? Math.round((100 * (ps.ready_count || 0)) / ps.setup_total)
+      : 0;
+    row.innerHTML = `
+      <label class="acct-sel" title="Use this account">
+        <input type="radio" name="acctSel" value="${esc(p.name)}" ${p.name === selName ? "checked" : ""}>
+        <span class="acct-name">${esc(p.name)}</span>
+      </label>
+      <span class="chip account-chip ${esc(ps.code || "")}">${esc(ps.label || "—")}</span>
+      <div class="acct-meter ${ps.ready ? "ready" : ""}" title="Setup ${ps.ready_count || 0}/${ps.setup_total}">
+        <span class="meter-fill" style="width:${meter}%"></span>
+        <b>${ps.ready_count || 0}/${ps.setup_total}</b>
+      </div>
+      <div class="acct-checks">${checks}</div>
+      <div class="acct-actions">
+        <button class="btn outline mini" data-act="check" title="Re-check the Facebook session">Check</button>
+        <button class="btn outline mini" data-act="relogin" title="Open a browser to log in again">Re-login</button>
+        <button class="btn danger mini" data-act="remove" title="Remove this account">Remove</button>
+      </div>`;
+    row.querySelector(".acct-sel").addEventListener("click", () => selectAccount(p.name));
+    row.querySelector('[data-act="check"]').addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await selectAccount(p.name, true);
+      verifySession(true);
+    });
+    row.querySelector('[data-act="relogin"]').addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await selectAccount(p.name, true);
+      reloginSelected();
+    });
+    row.querySelector('[data-act="remove"]').addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await selectAccount(p.name, true);
+      removeSelected();
+    });
+    box.appendChild(row);
+  });
+}
+
+async function selectAccount(name, silent) {
+  const sel = $("#profileSelect");
+  if (sel.value !== name) {
+    sel.value = name;
+    state.lastAutoVerify = null;
+    try {
+      await api("/api/prefs", { method: "POST", body: { last_profile: name } });
+    } catch (e) {}
+  }
+  if (!silent) toast("Selected account: " + name, "info");
+}
+
+function renderResumeBanner(st) {
+  const el = $("#resumeBanner");
+  const ij = st.interrupted_job;
+  if (!ij || !ij.type || st.busy) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  const label = ij.type === "join" ? "Auto-Join"
+    : ij.type === "scan" ? "Group scan"
+    : ij.type === "check" ? "Join-status check"
+    : "Posting run";
+  const p = ij.progress || {};
+  const prog = p.total ? ` — ${p.done}/${p.total} processed` : "";
+  $("#resumeText").textContent =
+    `A ${label} on '${ij.profile || "your account"}' was interrupted${prog}. ` +
+    `Resume continues where it stopped (already-processed groups are skipped).`;
+}
+
+function renderHardStopBanner(st) {
+  const hs = st.hard_stop;
+  if (!hs) return;
+  // Show the full-screen notice only once per hard-stop instance, so it does
+  // not re-open on every state refresh. Reappears after a fresh join run or
+  // the next day.
+  if (state.hardStopDismissedAt === hs.triggered_at) return;
+  state.hardStopDismissedAt = hs.triggered_at;
+  openHardStopModal(hs);
+}
+
+function openHardStopModal(hs) {
+  const cap = hs.cap || 10;
+  const joined = hs.joined || 0;
+  $("#hardStopLead").textContent = hs.message || (
+    `You reached the safe daily limit of ${cap} group joins today (${joined} so far). ` +
+    `Auto-Join stopped here automatically so Facebook cannot flag your account ` +
+    `for "joining groups too fast".`
+  );
+  $("#hardStopCapVal").textContent = cap;
+  $("#hardStopJoinedVal").textContent = joined;
+  openModal("modalHardStop");
+}
+
+function dismissHardStop() {
+  closeModal("modalHardStop");
+}
+
+/* ---------------- tabs ---------------- */
+function renderTabs() {
+  const saved = localStorage.getItem("sm_tab") || "dashboard";
+  if (!state.activeTab) state.activeTab = saved;
+
+  $$(".sidebar-nav .tab-btn").forEach((btn) => {
+    const isActive = btn.dataset.tab === state.activeTab;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive);
+  });
+  $$(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.tab === state.activeTab);
+  });
+
+  if (state.activeTab === "history") loadHistory();
+
+  // activity badge: reset when Activity tab is active
+  const badgeAct = $("#badgeActivity");
+  if (state.activeTab === "activity") {
+    state.unseenLogCount = 0;
+    if (badgeAct) { badgeAct.classList.add("hidden"); badgeAct.textContent = "0"; }
+  } else if (state.unseenLogCount > 0 && badgeAct) {
+    badgeAct.classList.remove("hidden");
+    badgeAct.textContent = state.unseenLogCount > 99 ? "99+" : state.unseenLogCount;
+  }
+}
+
+function switchTab(tabName) {
+  state.activeTab = tabName;
+  localStorage.setItem("sm_tab", tabName);
+  renderTabs();
+}
+
+/* ---------------- journey stepper (server-side stage) ---------------- */
+const STEP_DEFS = {
+  join:  ["Launch Chrome", "Load targets", "Visit & Join", "Classify", "Finished"],
+  scan:  ["Launch Chrome", "Search", "Collect", "Check safety", "Finished"],
+  run:   ["Launch Chrome", "Scan", "Pick group", "Compose", "Publish", "Cooldown"],
+  check: ["Launch Chrome", "Load targets", "Check membership", "Finished"],
+};
+const STEP_IDX = {
+  join:  { launch: 0, prepare: 1, work: 2, classify: 3, done: 4 },
+  scan:  { launch: 0, search: 1, collect: 2, check: 3, filter: 3, done: 4 },
+  run:   { launch: 0, scan: 1, pick: 1, compose: 2, attach: 3, publish: 4, cooldown: 5, done: 5 },
+  check: { launch: 0, prepare: 1, work: 2, done: 3 },
+};
+
+function renderStepper(st) {
+  const container = $("#stepper");
+  const empty = $("#stepperEmpty");
+  const lastRes = $("#lastResult");
+  const sub = $("#stepperSub");
+
+  // busy: show live stepper from server-side stage
+  if (st.busy && st.job) {
+    empty.classList.add("hidden");
+    lastRes.classList.add("hidden");
+    container.innerHTML = "";
+
+    const job = st.job;
+    const steps = STEP_DEFS[job] || STEP_DEFS.run;
+    const map = STEP_IDX[job] || STEP_IDX.run;
+    const current = map[st.stage] ?? 0;
+
+    let detail = st.stage_detail || "";
+    if (!detail && job === "join" && st.join_progress) {
+      const jp = st.join_progress;
+      if (jp.total) detail = `${jp.done}/${jp.total} processed`;
+    }
+
+    let html = '<div class="stepper-track">';
+    steps.forEach((label, i) => {
+      const isDone = i < current;
+      const isActive = i === current;
+      const cls = isDone ? "done" : isActive ? "active" : "pending";
+      const icon = isDone
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
+        : (isActive ? '<span class="pulse-dot"></span>' : `<span>${i + 1}</span>`);
+      html += `
+        <div class="step ${cls}">
+          <div class="step-circle">${icon}</div>
+          <div class="step-label">${esc(label)}</div>
+          ${isActive && detail ? `<div class="step-detail">${esc(detail)}</div>` : ""}
+        </div>
+        ${i < steps.length - 1 ? '<div class="step-connector"></div>' : ""}
+      `;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    sub.textContent = st.status_text || "Current run progress at a glance";
+    return;
+  }
+
+  // idle: show last_result if available
+  const lr = st.last_result;
+  if (lr && lr.title) {
+    container.innerHTML = "";
+    empty.classList.add("hidden");
+    lastRes.classList.remove("hidden");
+    const okClass = lr.ok ? "ok" : "fail";
+    const icon = lr.ok ? "✓" : "✕";
+    lastRes.innerHTML = `
+      <div class="lr-head">
+        <div class="lr-icon ${okClass}">${icon}</div>
+        <div class="lr-title">${esc(lr.title)}</div>
+        <div class="lr-time">${esc(fmtWhen(lr.finished_at))}</div>
+      </div>
+      <div class="lr-summary">${esc(lr.summary || "")}</div>
+    `;
+    sub.textContent = "Last run result";
+    return;
+  }
+
+  // truly idle
+  container.innerHTML = "";
+  lastRes.classList.add("hidden");
+  empty.classList.remove("hidden");
+  sub.textContent = "Current run progress at a glance";
+}
+
+/* ---------------- completion toast ---------------- */
+function showCompletionToast(st) {
+  const lr = st.last_result;
+  if (!lr) return;
+  const title = lr.title || "Job finished";
+  const body = lr.summary || "Completed";
+  const container = $("#toastContainer");
+  const el = document.createElement("div");
+  el.className = "toast " + (lr.ok ? "success" : "error");
+  el.innerHTML = `<strong>${esc(title)}</strong><br>${esc(body)}`;
+  el.addEventListener("click", () => { teleport("activity"); el.remove(); });
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 200); }, 6000);
+}
+
+/* ---------------- copy logs ---------------- */
+async function copyLogs() {
+  const panel = $("#logPanel");
+  const lines = Array.from(panel.querySelectorAll(".log-line")).map(l => l.textContent.trim());
+  const text = lines.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  const btn = $("#btnCopyLog");
+  const original = btn.textContent;
+  btn.textContent = "Copied!";
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+}
+
+async function resumeInterrupted() {
+  try {
+    const r = await api("/api/resume", { method: "POST", body: {} });
+    if (r.ok) { toast("Resuming interrupted run…", "success"); teleport("activity"); }
+    else toast(r.error || "Could not resume.", "error");
+  } catch (e) { toast("Resume failed: " + e.message, "error"); }
+}
+
+async function discardInterrupted() {
+  try {
+    await api("/api/discard_interrupted", { method: "POST", body: {} });
+    toast("Interrupted-run state cleared.", "success");
+  } catch (e) { toast("Discard failed: " + e.message, "error"); }
 }
 
 function renderBanner(st) {
@@ -275,6 +668,17 @@ function appendLogs(lines) {
   panel.appendChild(frag);
   state.logLines += lines.length;
   $("#logCount").textContent = state.logLines + " lines";
+
+  // activity badge: count new lines when not on Activity tab
+  if (state.activeTab !== "activity") {
+    state.unseenLogCount += lines.length;
+    const badge = $("#badgeActivity");
+    if (badge) {
+      badge.classList.remove("hidden");
+      badge.textContent = state.unseenLogCount > 99 ? "99+" : state.unseenLogCount;
+    }
+  }
+
   // keep the panel bounded
   while (panel.children.length > 800) panel.removeChild(panel.firstChild);
   if (shouldStick) panel.scrollTop = panel.scrollHeight;
@@ -298,7 +702,7 @@ async function startRun() {
   if (!body.profile) return toast("Add an account first.", "warn");
   try {
     const r = await api("/api/start", { method: "POST", body });
-    if (r.ok) toast("Posting started.", "success");
+    if (r.ok) { toast("Posting started.", "success"); teleport("activity"); }
     else toast(r.error || "Could not start.", "error");
   } catch (e) { toast("Start failed: " + e.message, "error"); }
 }
@@ -309,9 +713,29 @@ async function scanGroups() {
   if (!body.keyword) toast("No keyword — will re-check unclassified groups only.", "warn");
   try {
     const r = await api("/api/scan", { method: "POST", body });
-    if (r.ok) toast("Scan started.", "success");
+    if (r.ok) { toast("Scan started.", "success"); teleport("activity"); }
     else toast(r.error || "Could not start scan.", "error");
   } catch (e) { toast("Scan failed: " + e.message, "error"); }
+}
+
+async function joinAllGroups() {
+  const profile = $("#profileSelect").value;
+  if (!profile) return toast("Add an account first.", "warn");
+  try {
+    const r = await api("/api/join_all", { method: "POST", body: { profile } });
+    if (r.ok) { toast("Auto-join started.", "success"); teleport("activity"); }
+    else toast(r.error || "Could not start auto-join.", "error");
+  } catch (e) { toast("Auto-join failed: " + e.message, "error"); }
+}
+
+async function checkJoinStatus() {
+  const profile = $("#profileSelect").value;
+  if (!profile) return toast("Add an account first.", "warn");
+  try {
+    const r = await api("/api/check_join", { method: "POST", body: { profile } });
+    if (r.ok) { toast("Join-status check started.", "success"); teleport("activity"); }
+    else toast(r.error || "Could not start check.", "error");
+  } catch (e) { toast("Check failed: " + e.message, "error"); }
 }
 
 async function stopRun() {
@@ -319,6 +743,21 @@ async function stopRun() {
     await api("/api/stop", { method: "POST", body: {} });
     toast("Stopping after the current post…", "warn");
   } catch (e) { toast("Stop failed: " + e.message, "error"); }
+}
+
+async function pauseRun() {
+  try {
+    const st = state.current;
+    if (st && st.paused) {
+      const r = await api("/api/unpause", { method: "POST", body: {} });
+      if (r.ok) toast("Resumed.", "success");
+      else toast(r.error || "Could not resume.", "error");
+    } else {
+      const r = await api("/api/pause", { method: "POST", body: {} });
+      if (r.ok) toast("Paused — will stop after current item.", "info");
+      else toast(r.error || "Could not pause.", "error");
+    }
+  } catch (e) { toast("Pause failed: " + e.message, "error"); }
 }
 
 /* ---------------- actions: accounts ---------------- */
@@ -382,6 +821,8 @@ function openSettings() {
   $("#setMaxCycle").value = s.max_cycle_posts ?? 0;
   $("#setHeadless").checked = !!s.headless;
   $("#setScanOnStart").checked = !!s.scan_on_start;
+  $("#setJoinDelayMin").value = s.join_delay_min ?? 30;
+  $("#setJoinDelayMax").value = s.join_delay_max ?? 90;
   openModal("modalSettings");
 }
 
@@ -393,6 +834,8 @@ async function saveSettings() {
     max_cycle_posts: $("#setMaxCycle").value,
     headless: $("#setHeadless").checked,
     scan_on_start: $("#setScanOnStart").checked,
+    join_delay_min: $("#setJoinDelayMin").value,
+    join_delay_max: $("#setJoinDelayMax").value,
   };
   try {
     const r = await api("/api/settings", { method: "POST", body });
@@ -511,7 +954,6 @@ async function loadBrowse() {
   }
 }
 function browseUp() {
-  const st = state.current;
   const cur = browsePath;
   if (!cur) return;
   const parts = cur.replace(/\//g, "\\").split("\\").filter(Boolean);
@@ -528,7 +970,7 @@ function selectBrowse() {
 }
 
 /* ---------------- groups ---------------- */
-function switchTab(status) {
+function switchGroupTab(status) {
   state.groupStatus = status;
   $$("#groupTabs .tab").forEach((t) => t.classList.toggle("active", t.dataset.status === status));
   loadGroups(status, true);
@@ -549,27 +991,47 @@ async function loadGroups(status, force) {
   }
 }
 
+const JOIN_STATUS_LABELS = {
+  not_joined: "Not checked",
+  pending: "Pending",
+  joined: "Joined",
+  declined: "Declined",
+  unviewable: "Unviewable",
+  unknown: "Unknown",
+};
+const JOIN_STATUS_COLORS = {
+  not_joined: "muted",
+  pending: "warn",
+  joined: "ok",
+  declined: "bad",
+  unviewable: "muted",
+  unknown: "muted",
+};
+
 function renderGroups(rows) {
   const body = $("#groupsBody");
   if (!rows.length) {
     const msg = state.groupStatus === "unknown"
-      ? "No groups in review. Run a scan to discover and classify groups."
-      : `No ${state.groupStatus === "safe" ? "safe" : "skipped"} groups yet. Classify groups from the Review tab.`;
-    body.innerHTML = `<tr><td colspan="6" class="empty-cell" id="groupsEmpty">${msg}</td></tr>`;
+      ? "No groups in review yet. Run a scan or Auto-Join — the app classifies each group automatically."
+      : `No ${state.groupStatus === "safe" ? "safe" : "skipped"} groups yet. Groups are classified automatically when you scan or join.`;
+    body.innerHTML = `<tr><td colspan="7" class="empty-cell" id="groupsEmpty">${msg}</td></tr>`;
     return;
   }
   body.innerHTML = rows.map((g) => {
     const name = g.name || g.id;
+    const js = g.join_status || "not_joined";
+    const jsLabel = JOIN_STATUS_LABELS[js] || js;
+    const jsColor = JOIN_STATUS_COLORS[js] || "muted";
     return `<tr data-id="${esc(g.id)}">
       <td><div class="gname" title="${esc(name)}">${esc(name)}</div><div class="gid">${esc(g.id)}</div></td>
       <td class="num mono">${fmtMembers(g.member_count)}</td>
       <td><span class="signal" title="${esc(g.approval_signal || "")}">${esc(g.approval_signal || "—")}</span></td>
+      <td><span class="join-badge ${jsColor}" title="Last checked: ${esc(fmtWhen(g.join_checked_at))}">${jsLabel}</span></td>
       <td class="num mono">${g.times_posted ?? 0}</td>
       <td class="mono">${esc(fmtWhen(g.last_posted_at))}</td>
       <td class="actions">
         <span class="row-actions">
-          ${state.groupStatus !== "safe" ? `<button class="row-btn safe" data-act="mark-safe" title="Post here immediately">✓ Safe</button>` : ""}
-          ${state.groupStatus !== "skip" ? `<button class="row-btn skip" data-act="mark-skip" title="Skip — posts go to approval">✕ Skip</button>` : ""}
+          ${state.groupStatus === "safe" ? `<button class="row-btn skip" data-act="mark-skip" title="Mark this group unsafe — never auto-post to it">Mark Unsafe</button>` : ""}
           <button class="row-btn del" data-act="delete" title="Delete this group">Delete</button>
         </span>
       </td>
@@ -583,7 +1045,6 @@ function renderGroups(rows) {
       tr.classList.add("selected");
     });
     const gid = tr.dataset.id;
-    tr.querySelector('[data-act="mark-safe"]')?.addEventListener("click", () => markGroup(gid, "safe"));
     tr.querySelector('[data-act="mark-skip"]')?.addEventListener("click", () => markGroup(gid, "skip"));
     tr.querySelector('[data-act="delete"]')?.addEventListener("click", () => deleteGroup(gid));
   });
@@ -599,7 +1060,6 @@ async function markGroup(id, status) {
   } catch (e) { toast("Mark failed: " + e.message, "error"); }
 }
 async function deleteGroup(id) {
-  const g = state.current.group_counts;
   if (!confirm("Delete this group from the database?")) return;
   try {
     await api("/api/group/delete", { method: "POST", body: { id } });
@@ -609,11 +1069,89 @@ async function deleteGroup(id) {
   } catch (e) { toast("Delete failed: " + e.message, "error"); }
 }
 
+/* ---------------- history ---------------- */
+const HISTORY_TYPE_LABELS = {
+  join: "Auto-Join",
+  check: "Join-status check",
+  scan: "Group scan",
+  run: "Posting run",
+};
+const HISTORY_STATUS_LABELS = {
+  finished: "Finished",
+  cancelled: "Cancelled",
+  failed: "Failed",
+  interrupted: "Left hanging",
+};
+
+async function loadHistory() {
+  const body = $("#historyBody");
+  try {
+    const r = await api("/api/history");
+    const rows = (r && r.history) || [];
+    const sub = $("#historySub");
+    if (sub) sub.textContent = rows.length
+      ? `${rows.length} job(s) recorded — newest first.`
+      : "Every job the app has run - finished, cancelled, or left hanging.";
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="5" class="empty-cell">No runs recorded yet. Run a scan, Auto-Join, or a join-status check.</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map((h) => {
+      const type = HISTORY_TYPE_LABELS[h.type] || h.type;
+      const stLabel = HISTORY_STATUS_LABELS[h.status] || h.status;
+      const stClass = h.status === "finished" ? "ok"
+        : h.status === "cancelled" ? "warn"
+        : h.status === "failed" ? "bad"
+        : h.status === "interrupted" ? "warn" : "muted";
+      const prog = (typeof h.progress_done === "number" && typeof h.progress_total === "number")
+        ? `${h.progress_done}/${h.progress_total}`
+        : (typeof h.progress_done === "number" ? `${h.progress_done} done` : "—");
+      const when = h.finished_at || h.started_at || "";
+      const summary = h.summary || "";
+      return `<tr>
+        <td class="mono">${esc(fmtWhen(when))}</td>
+        <td>${esc(type)}${h.profile ? ` <span class="gid">on ${esc(h.profile)}</span>` : ""}</td>
+        <td><span class="join-badge ${stClass}" title="Status: ${esc(h.status)}">${esc(stLabel)}</span></td>
+        <td class="num mono">${esc(prog)}</td>
+        <td title="${esc(summary)}">${esc(summary)}</td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="empty-cell">Could not load history: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+/* ---------------- sidebar ---------------- */
+function toggleSidebar() {
+  const sb = $("#sidebar");
+  const collapsed = sb.classList.toggle("collapsed");
+  localStorage.setItem("sm_sidebar", collapsed ? "1" : "");
+}
+
 /* ---------------- wiring ---------------- */
 function bind() {
+  // sidebar
+  const savedSidebar = localStorage.getItem("sm_sidebar");
+  if (savedSidebar) $("#sidebar").classList.add("collapsed");
+  $("#btnCollapse").addEventListener("click", toggleSidebar);
+
+  // settings (both sidebar and old topbar button if present)
+  $("#btnSettingsSidebar")?.addEventListener("click", openSettings);
+  $("#btnSettings")?.addEventListener("click", openSettings);
+
   $("#btnStart").addEventListener("click", startRun);
   $("#btnStop").addEventListener("click", stopRun);
+  $("#btnPause").addEventListener("click", pauseRun);
+  $("#btnAcStop").addEventListener("click", stopRun);
+  $("#btnAcPause").addEventListener("click", pauseRun);
+  $("#btnGrpStop").addEventListener("click", stopRun);
+  $("#btnGrpPause").addEventListener("click", pauseRun);
+  $("#btnHardStopGotIt").addEventListener("click", dismissHardStop);
   $("#btnScan").addEventListener("click", scanGroups);
+  $("#btnJoinAll").addEventListener("click", joinAllGroups);
+  $("#btnCheckJoin").addEventListener("click", checkJoinStatus);
+  $("#btnResume").addEventListener("click", resumeInterrupted);
+  $("#btnDiscard").addEventListener("click", discardInterrupted);
 
   $("#btnAddAccount").addEventListener("click", () => {
     $("#addName").value = "";
@@ -627,20 +1165,24 @@ function bind() {
 
   $("#btnVerify").addEventListener("click", () => verifySession(false));
   $("#btnManage").addEventListener("click", () => { refreshAccountsModal(); openModal("modalAccounts"); });
+  $("#btnAddAccount2")?.addEventListener("click", () => { $("#addName").value = ""; openModal("modalAdd"); });
+  $("#btnImport2")?.addEventListener("click", openImportModal);
+  $("#btnManage2")?.addEventListener("click", () => { refreshAccountsModal(); openModal("modalAccounts"); });
   $("#btnAccountsAdd").addEventListener("click", () => {
     closeModal("modalAccounts");
     setTimeout(() => { $("#addName").value = ""; openModal("modalAdd"); }, 60);
   });
-
-  $("#btnSettings").addEventListener("click", openSettings);
-  $("#btnSaveSettings").addEventListener("click", saveSettings);
 
   $("#btnBrowseFolder").addEventListener("click", openBrowse);
   $("#btnBrowseUp").addEventListener("click", browseUp);
   $("#btnBrowseSelect").addEventListener("click", selectBrowse);
 
   $("#btnRefreshGroups").addEventListener("click", () => { groupsCache = {}; loadGroups(state.groupStatus, true); });
-  $$("#groupTabs .tab").forEach((t) => t.addEventListener("click", () => switchTab(t.dataset.status)));
+  $("#btnRefreshHistory")?.addEventListener("click", loadHistory);
+  $$("#groupTabs .tab").forEach((t) => t.addEventListener("click", () => switchGroupTab(t.dataset.status)));
+
+  // main tab navigation (sidebar nav)
+  $$(".sidebar-nav .tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 
   $("#profileSelect").addEventListener("change", async () => {
     const name = $("#profileSelect").value;
@@ -658,6 +1200,8 @@ function bind() {
     } catch (e) { toast("Clear failed: " + e.message, "error"); }
   });
 
+  $("#btnCopyLog").addEventListener("click", copyLogs);
+
   // modal close wiring
   $$(".modal").forEach((m) => {
     const id = m.id;
@@ -672,5 +1216,5 @@ function bind() {
 document.addEventListener("DOMContentLoaded", () => {
   bind();
   poll();
-  loadGroups("safe", true);
+  loadGroups("all", true);
 });

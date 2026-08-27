@@ -104,15 +104,27 @@ def _has_composer(page):
     return False
 
 
-def check_group(page, group_id, log=None):
-    """Check one group and return (status, signal)."""
+def check_group(page, group_id, log=None, goto=True):
+    """Check one group and return (status, signal).
+
+    goto=False classifies the page the browser is already on (used right
+    after an auto-join click, saving a full revisit).
+    """
     log = log or (lambda msg: print(msg))
-    url = f"https://www.facebook.com/groups/{group_id}/"
+    if goto:
+        url = f"https://www.facebook.com/groups/{group_id}/"
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            return "unknown", f"load error: {e}"
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3500)
-    except Exception as e:
-        return "unknown", f"load error: {e}"
+        try:
+            page.wait_for_selector('div[role="main"]', timeout=5000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1200)
+    except Exception:
+        pass
 
     # Private / unavailable groups never load properly.
     body_text = ""
@@ -124,9 +136,18 @@ def check_group(page, group_id, log=None):
         if phrase in body_text.lower():
             return "skip", f"unviewable: '{phrase}'"
 
-    # Not a member -> cannot post.
-    if re.search(r"\bjoin group\b", body_text, re.IGNORECASE):
-        return "skip", "not a member"
+    # Check if we are actually a member BEFORE checking post-approval signals.
+    # "Leave group" means we ARE a member (page is valid for posting).
+    low = body_text.lower()
+    is_member = any(p in low for p in ("leave group", "leave this group"))
+    has_join_button = bool(re.search(r"\bjoin group\b", body_text, re.IGNORECASE))
+
+    # Not a member AND no leave-group signal → cannot post here.
+    # But only flag as "not a member" if there's no composer visible either
+    # (some public groups show a composer to non-members).
+    if has_join_button and not is_member:
+        if not _has_composer(page):
+            return "skip", "not a member"
 
     html = ""
     try:
@@ -148,3 +169,52 @@ def check_group(page, group_id, log=None):
         return "safe", "composer present, no approval signal"
 
     return "unknown", "no composer or approval signal found"
+
+
+MEMBER_PHRASES = ["leave group", "leave this group"]
+PENDING_PHRASES = ["cancel request", "request sent", "requested", "pending", "membership request"]
+DECLINED_PHRASES = ["join group"]
+UNVIEWABLE_PHRASES2 = ["this content isn't available", "this content is no longer available"]
+
+
+def check_membership_status(page, group_id, log=None):
+    """Visit a group page and determine whether we are a member.
+
+    Returns (join_status, detail) where join_status is one of:
+        joined, pending, declined, left, unviewable, unknown
+    """
+    log = log or (lambda msg: print(msg))
+    url = f"https://www.facebook.com/groups/{group_id}/"
+    try:
+        # Read-only navigation. DOMContentLoaded brings back the group HTML
+        # which already contains the membership text signals; we do NOT need
+        # the full React render (main pane) to detect them, so we skip the
+        # wait_for_selector(main) that could add up to 4s per group and rely
+        # on a short settle so Playwright has committed the DOM.
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(450)
+    except Exception as e:
+        return "unknown", f"load error: {e}"
+
+    body = ""
+    try:
+        body = (page.inner_text("body") or "").lower()
+    except Exception:
+        return "unknown", "could not read page"
+
+    for phrase in UNVIEWABLE_PHRASES2:
+        if phrase in body:
+            return "unviewable", phrase
+
+    for phrase in MEMBER_PHRASES:
+        if phrase in body:
+            return "joined", f"member signal: '{phrase}'"
+
+    for phrase in PENDING_PHRASES:
+        if phrase in body:
+            return "pending", f"pending signal: '{phrase}'"
+
+    if re.search(r"\bjoin group\b", body):
+        return "declined", "join button present — not a member"
+
+    return "unknown", "no clear membership signal found"

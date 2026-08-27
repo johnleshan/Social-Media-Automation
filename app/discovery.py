@@ -42,18 +42,24 @@ def _extract_group_id(href):
 
 
 def _group_name_from_link(link):
-    aria = link.get_attribute("aria-label")
-    if aria and aria.strip() and aria.strip().lower() != "group":
-        return aria.strip()
+    aria = (link.get_attribute("aria-label") or "").strip()
+    low = aria.lower()
+    # avatar links are labelled "Profile photo of <group name>"
+    if low.startswith("profile photo of"):
+        return aria[len("profile photo of"):].strip()
+    if aria and low != "group":
+        return aria
     text = link.inner_text().strip()
     if text:
         return text
     return ""
 
 
-def _collect_links(page, max_scrolls=8, scroll_wait=1200):
+def _collect_links(page, max_scrolls=8, scroll_wait=900):
     seen = {}
+    stale_rounds = 0
     for _ in range(max_scrolls):
+        added = 0
         links = page.query_selector_all('a[href*="/groups/"]')
         for link in links:
             href = link.get_attribute("href") or ""
@@ -62,8 +68,23 @@ def _collect_links(page, max_scrolls=8, scroll_wait=1200):
                 continue
             if gid not in seen:
                 name = _group_name_from_link(link)
-                card = link.evaluate("el => el.closest('div[role=button], div[aria-label], div')")
-                card_text = card["innerText"] if card else ""
+                # Climb from the link until a block that mentions "members" is
+                # found and use that text for the member count. Done inside the
+                # browser so the result is a plain string (no serialization of
+                # DOM nodes, which varies across Playwright versions).
+                card_text = link.evaluate(
+                    "el => {"
+                    "  const re = /([\\d.,]+)\\s*[KkMm]?\\s*members?/;"
+                    "  let n = el;"
+                    "  while (n) {"
+                    "    const t = n.innerText || '';"
+                    "    if (re.test(t)) return t;"
+                    "    n = n.parentElement;"
+                    "  }"
+                    "  return '';"
+                    "}"
+                )
+                card_text = card_text if isinstance(card_text, str) else ""
                 if not name:
                     # pull the first line of the surrounding card text
                     first = next(
@@ -76,6 +97,13 @@ def _collect_links(page, max_scrolls=8, scroll_wait=1200):
                     "member_count": _parse_member_count(card_text),
                     "url": f"https://www.facebook.com/groups/{gid}/",
                 }
+                added += 1
+        if added == 0:
+            stale_rounds += 1
+            if stale_rounds >= 2:
+                break  # page stopped offering new groups — don't scroll on
+        else:
+            stale_rounds = 0
         page.mouse.wheel(0, 4000)
         page.wait_for_timeout(scroll_wait)
     return list(seen.values())
@@ -114,7 +142,12 @@ def search_groups(page, query, filter_mode="search", min_members=0, log=None):
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
     except Exception as e:
         raise RuntimeError(f"search page would not load: {e}")
-    page.wait_for_timeout(4000)
+    # results render via JS — wait for the first group link instead of a fixed nap
+    try:
+        page.wait_for_selector('a[href*="/groups/"]', timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(2500)
 
     body = _body_text(page)
     low = body.lower()
@@ -130,18 +163,26 @@ def search_groups(page, query, filter_mode="search", min_members=0, log=None):
         )
 
     candidates = _collect_links(page)
+    log(f"Found {len(candidates)} candidate group(s) on the search page")
+
+    if min_members:
+        before = len(candidates)
+        candidates = [
+            c for c in candidates
+            if not (c["member_count"] and c["member_count"] < min_members)
+        ]
+        log(f"Min-members ({min_members}) filter: kept {len(candidates)}/{before}")
 
     if filter_mode == "hard":
-        keyword = query.lower()
+        words = [w for w in re.split(r"\s+", query.lower()) if w]
         matched = []
         for c in candidates:
             name = (c["name"] or "").lower()
-            if keyword and keyword not in name:
-                continue
-            if min_members and c["member_count"] and c["member_count"] < min_members:
+            if words and not all(w in name for w in words):
                 continue
             matched.append(c)
         candidates = matched
+        log(f"{len(candidates)} group(s) match the filter")
 
     log(f"Found {len(candidates)} groups")
     return candidates

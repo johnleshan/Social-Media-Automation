@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS groups (
     url TEXT,
     status TEXT NOT NULL DEFAULT 'unknown',
     approval_signal TEXT,
+    join_status TEXT NOT NULL DEFAULT 'not_joined',
+    join_checked_at TEXT,
     times_posted INTEGER DEFAULT 0,
     last_posted_at TEXT,
     created_at TEXT,
@@ -40,11 +42,29 @@ CREATE TABLE IF NOT EXISTS run_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    profile TEXT,
+    status TEXT NOT NULL,
+    summary TEXT,
+    progress_done INTEGER,
+    progress_total INTEGER,
+    started_at TEXT,
+    finished_at TEXT
+);
 """
 
 STATUS_SAFE = "safe"
 STATUS_SKIP = "skip"
 STATUS_UNKNOWN = "unknown"
+
+JOIN_NOT_JOINED = "not_joined"
+JOIN_PENDING = "pending"
+JOIN_JOINED = "joined"
+JOIN_DECLINED = "declined"
+JOIN_LEFT = "left"
 
 
 def _now():
@@ -58,8 +78,19 @@ class Database:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
         self._lock = __import__("threading").Lock()
+
+    def _migrate(self):
+        """Add columns that were introduced after the initial schema."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(groups)").fetchall()}
+        if "join_status" not in cols:
+            self.conn.execute(
+                "ALTER TABLE groups ADD COLUMN join_status TEXT NOT NULL DEFAULT 'not_joined'"
+            )
+        if "join_checked_at" not in cols:
+            self.conn.execute("ALTER TABLE groups ADD COLUMN join_checked_at TEXT")
 
     def close(self):
         self.conn.close()
@@ -92,6 +123,51 @@ class Database:
                 (status, signal, _now(), group_id),
             )
             self.conn.commit()
+
+    def set_join_status(self, group_id, join_status):
+        with self._lock:
+            self.conn.execute(
+                "UPDATE groups SET join_status = ?, join_checked_at = ? WHERE id = ?",
+                (join_status, _now(), group_id),
+            )
+            self.conn.commit()
+
+    def record_join(self, group_id, result):
+        """Record a join attempt and track daily count."""
+        with self._lock:
+            today = datetime.now().strftime("%Y-%m-%d")
+            key = f"joins_today:{today}"
+            row = self.conn.execute(
+                "SELECT value FROM run_state WHERE key = ?", (key,)
+            ).fetchone()
+            count = int(row["value"]) if row else 0
+            self.conn.execute(
+                "INSERT INTO run_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(count + 1)),
+            )
+            self.conn.commit()
+            return count + 1
+
+    def joins_today(self):
+        """Return number of join attempts made today."""
+        with self._lock:
+            today = datetime.now().strftime("%Y-%m-%d")
+            key = f"joins_today:{today}"
+            row = self.conn.execute(
+                "SELECT value FROM run_state WHERE key = ?", (key,)
+            ).fetchone()
+            return int(row["value"]) if row else 0
+
+    def get_groups_by_join_status(self, *join_statuses):
+        """Return groups matching any of the given join_status values."""
+        with self._lock:
+            placeholders = ",".join("?" for _ in join_statuses)
+            rows = self.conn.execute(
+                f"SELECT * FROM groups WHERE join_status IN ({placeholders}) ORDER BY member_count DESC",
+                join_statuses,
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def get_group(self, group_id):
         with self._lock:
@@ -191,3 +267,27 @@ class Database:
                 (key, value),
             )
             self.conn.commit()
+
+    # ---- history ----
+    def add_history(self, job_type, profile, status, summary="",
+                    progress_done=None, progress_total=None,
+                    started_at=None, finished_at=None):
+        """Persist a record of a finished, cancelled, failed, or interrupted job."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO history "
+                "(type, profile, status, summary, progress_done, progress_total, "
+                " started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_type, profile, status, summary, progress_done, progress_total,
+                 started_at or _now(), finished_at or _now()),
+            )
+            self.conn.commit()
+
+    def get_history(self, limit=200):
+        """Return most-recent job history, newest first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM history ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]

@@ -6,6 +6,12 @@ __pycache__/
 venv/
 env/
 
+# Block OpenCode from trailing deep dependencies and builds
+node_modules/
+dist/
+build/
+.next/
+
 # Runtime data
 data/
 profiles/

@@ -19,6 +19,7 @@ from .browser import (
     FacebookBrowser,
     find_chrome_user_data_dir,
     import_chrome_session,
+    chrome_running,
     list_chrome_profiles,
     open_login,
 )
@@ -49,7 +50,7 @@ class App(ttk.Window):
         self.config = Config()
         self.db = Database()
         self.log_q = queue.Queue()
-        self.worker = Worker(self.config, self.db, log=self.log_q.put)
+        self.worker = Worker(self.config, self.db, log=self.log_q.put, notify=None)
 
         self._build_ui()
         self._refresh_accounts()
@@ -308,31 +309,39 @@ class App(ttk.Window):
 
         def job():
             try:
-                import_chrome_session(profile["user_data_dir"], chrome_dir, chosen, self.log_q.put)
+                if chrome_running():
+                    raise RuntimeError(
+                        "Chrome is currently open. Close it fully (all windows and "
+                        "the tray icon), then run Import again."
+                    )
+                skipped = import_chrome_session(profile["user_data_dir"], chrome_dir, chosen, self.log_q.put)
+                if skipped:
+                    self.log_q.put(
+                        f"WARNING: {len(skipped)} locked file(s) skipped. Close Chrome "
+                        "fully and import again for a complete session."
+                    )
             except Exception as e:
                 self.log_q.put(f"Import failed: {e}")
                 return
-            cookies = os.path.join(profile["user_data_dir"], "Default", "Network", "Cookies")
-            if not os.path.exists(cookies):
-                self.log_q.put(
-                    "IMPORTANT: Chrome's cookie file could not be copied because "
-                    "Chrome is still open. Close Chrome fully, then run Import "
-                    "again for this account."
-                )
-                return
             self.log_q.put("Import done. Verifying the session...")
+            ok = False
             try:
                 fb = FacebookBrowser(profile["user_data_dir"], headless=True, log=self.log_q.put)
                 fb.launch()
                 ok = fb.is_logged_in(timeout_ms=45000)
                 fb.close()
-                self.log_q.put(
-                    "Session verified: logged in. You can start posting."
-                    if ok else
-                    "Imported, but the session is not logged into Facebook."
-                )
             except Exception as e:
                 self.log_q.put(f"Verification error: {e}")
+            if ok:
+                self.log_q.put("Session verified: logged in. You can start posting.")
+                return
+            self.log_q.put(
+                "The copied profile is not logged into Facebook. Modern Chrome "
+                "encrypts its session cookies, so a copy can't carry the login. "
+                "A normal Chrome window will open so you can log in once on this "
+                "account instead."
+            )
+            open_login(profile["user_data_dir"], self.log_q.put, verify=True)
 
         t = threading.Thread(target=job, daemon=True)
         t.start()

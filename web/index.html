@@ -11,248 +11,426 @@
 <body>
 <div id="app">
 
-  <!-- ============ TOP BAR ============ -->
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2 4 6v6c0 4.4 3.4 8.4 8 9 4.6-.6 8-4.6 8-9V6l-8-4z"/>
-          <path d="m9 12 2 2 4-4"/>
-        </svg>
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="sidebar-brand">
+        <div class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2 4 6v6c0 4.4 3.4 8.4 8 9 4.6-.6 8-4.6 8-9V6l-8-4z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Group Post Automator</h1>
+          <p class="brand-sub">Local automation</p>
+        </div>
       </div>
-      <div class="brand-text">
-        <h1>Group Post Automator</h1>
-        <p>Local Facebook group automation</p>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <div id="statusPill" class="pill idle">
-        <span class="dot"></span><span id="statusText">Connecting…</span>
-      </div>
-      <div class="chip" title="Posts marked as posted today">
-        <span class="chip-icon">▲</span><span id="postedChip">0</span> posted today
-      </div>
-      <button id="btnSettings" class="icon-btn" title="Settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-        </svg>
+      <button id="btnCollapse" class="sidebar-toggle" title="Collapse sidebar" aria-label="Collapse sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
       </button>
     </div>
-  </header>
 
-  <main class="layout">
+    <nav class="sidebar-nav" role="tablist" aria-label="Main sections">
+      <button class="tab-btn" role="tab" aria-selected="true" data-tab="dashboard" id="tabDashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span class="tab-label">Dashboard</span>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="groups" id="tabGroups">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6"/><path d="M19 8v6"/></svg>
+        <span class="tab-label">Groups</span>
+        <span class="tab-badge hidden" id="badgeGroups" aria-live="polite">0</span>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="activity" id="tabActivity">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20"/><path d="M6.5 17H14"/><path d="M10 13h4"/><path d="M10 9h4"/><path d="M10 5h4"/></svg>
+        <span class="tab-label">Activity</span>
+        <span class="tab-badge hidden" id="badgeActivity" aria-live="polite">0</span>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="history" id="tabHistory">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span class="tab-label">History</span>
+      </button>
+    </nav>
 
-    <!-- ============ STATUS BANNER ============ -->
-    <section id="banner" class="banner hidden" role="alert">
-      <div class="banner-icon" id="bannerIcon">!</div>
-      <div class="banner-body">
-        <div class="banner-title" id="bannerTitle">Notice</div>
-        <div class="banner-text" id="bannerText"></div>
-      </div>
-      <div class="banner-actions" id="bannerActions"></div>
-    </section>
+    <div class="sidebar-foot">
+      <button id="btnSettingsSidebar" class="sidebar-action" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82-.33l-.06-.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span class="tab-label">Settings</span>
+      </button>
+    </div>
+  </aside>
 
-    <!-- ============ ACCOUNT BAR ============ -->
-    <section class="card account-bar">
-      <div class="card-head">
-        <h2>Account</h2>
-        <span class="card-sub">The Facebook profile the bot posts as</span>
-      </div>
-      <div class="account-controls">
-        <div class="field">
-          <label for="profileSelect">Profile</label>
-          <select id="profileSelect"></select>
+  <div class="main-wrap">
+
+    <!-- ============ TOP BAR (minimal) ============ -->
+    <header class="topbar">
+      <div class="topbar-center">
+        <div id="statusPill" class="pill idle">
+          <span class="dot"></span><span id="statusText">Connecting…</span>
         </div>
-        <span id="accountChip" class="chip account-chip">—</span>
-        <div class="account-btns">
-          <button id="btnAddAccount" class="btn ghost" title="Create a new account and open a browser to log in once">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-            Add Account
-          </button>
-          <button id="btnImport" class="btn outline" title="Copy your already-logged-in Chrome session">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
-            <span class="lbl">Import from Chrome</span>
-          </button>
-          <button id="btnVerify" class="btn outline" title="Open a headless browser and confirm the selected account is logged in">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            <span class="lbl">Check session</span>
-          </button>
-          <button id="btnManage" class="btn outline" title="Re-login, import or remove accounts">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>
-            Manage
-          </button>
+        <div class="chip" title="Posts marked as posted today">
+          <span class="chip-icon">▲</span><span id="postedChip">0</span> posted today
         </div>
       </div>
-      <div class="account-detail" id="acctDetail"></div>
-    </section>
+    </header>
 
-    <!-- ============ MAIN GRID ============ -->
-    <div class="grid">
+    <main class="layout">
 
-      <!-- ------------ LEFT COLUMN ------------ -->
-      <div class="col">
+      <!-- ============ STATUS BANNER ============ -->
+      <section id="banner" class="banner hidden" role="alert">
+        <div class="banner-icon" id="bannerIcon">!</div>
+        <div class="banner-body">
+          <div class="banner-title" id="bannerTitle">Notice</div>
+          <div class="banner-text" id="bannerText"></div>
+        </div>
+        <div class="banner-actions" id="bannerActions"></div>
+      </section>
 
-        <!-- Discovery -->
-        <section class="card">
-          <div class="card-head">
-            <h2>Group Discovery</h2>
-            <span class="card-sub">Find new groups to classify and post into</span>
-          </div>
-          <div class="field">
-            <label for="keywordInput">Search / keyword</label>
-            <input id="keywordInput" type="text" placeholder="e.g. investments kenya — leave empty to check unclassified groups">
-          </div>
-          <div class="field-row">
-            <div class="field grow">
-              <label>Filter mode</label>
-              <div class="seg" id="modeSeg">
-                <input type="radio" name="mode" id="modeSearch" value="search" checked>
-                <label for="modeSearch">Search</label>
-                <input type="radio" name="mode" id="modeHard" value="hard">
-                <label for="modeHard">Hard filter</label>
+      <!-- ============ RESUME BANNER ============ -->
+      <section id="resumeBanner" class="banner banner-warn hidden" role="alert">
+        <div class="banner-icon">!</div>
+        <div class="banner-body">
+          <div class="banner-title">Interrupted run found</div>
+          <div class="banner-text" id="resumeText"></div>
+        </div>
+        <div class="banner-actions">
+          <button class="btn primary small" id="btnResume">Resume</button>
+          <button class="btn outline small" id="btnDiscard">Discard</button>
+        </div>
+      </section>
+
+      <!-- ============ TAB PANELS ============ -->
+      <div class="tab-panels">
+
+        <!-- -------- DASHBOARD TAB -------- -->
+        <section class="tab-panel active" role="tabpanel" aria-labelledby="tabDashboard" data-tab="dashboard">
+
+          <!-- ============ ACCOUNT QUICK-SETUP ============ -->
+          <section class="card account-bar">
+            <div class="card-head">
+              <h2>Account</h2>
+              <span class="card-sub">The Facebook profile the bot posts as</span>
+            </div>
+            <div class="account-controls">
+              <div class="field grow">
+                <label for="profileSelect">Profile</label>
+                <select id="profileSelect"></select>
+              </div>
+              <span id="accountChip" class="chip account-chip">—</span>
+              <div class="account-btns">
+                <button id="btnAddAccount" class="btn ghost" title="Create a new account and open a browser to log in once">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                  Add Account
+                </button>
+                <button id="btnImport" class="btn outline" title="Copy your already-logged-in Chrome session">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+                  <span class="lbl">Import from Chrome</span>
+                </button>
+                <button id="btnVerify" class="btn outline" title="Open a headless browser and confirm the selected account is logged in">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <span class="lbl">Check session</span>
+                </button>
               </div>
             </div>
-            <div class="field w140">
-              <label for="minMembers">Min members</label>
-              <input id="minMembers" type="number" min="0" step="100" value="0">
+            <div class="account-detail" id="acctDetail"></div>
+          </section>
+
+          <!-- ============ RUN CARD ============ -->
+          <section class="card run-card">
+            <div class="card-head">
+              <h2>Run</h2>
+              <span class="card-sub" id="runSub">Posting engine</span>
+            </div>
+            <div class="run-buttons">
+              <button id="btnStart" class="btn success grow">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                Start Posting
+              </button>
+              <button id="btnPause" class="btn outline" disabled title="Pause between iterations">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                Pause
+              </button>
+              <button id="btnStop" class="btn danger" disabled>
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                Stop
+              </button>
+            </div>
+            <div class="run-status" id="runStatus">Idle</div>
+            <div class="recent" id="recentList">
+              <div class="recent-empty">No posts yet this session.</div>
+            </div>
+          </section>
+
+          <!-- ============ STATS ROW ============ -->
+          <section class="stats">
+            <div class="stat">
+              <span class="stat-value accent" id="statPostedToday">0</span>
+              <span class="stat-label">Posted today</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value" id="statTotalPosted">0</span>
+              <span class="stat-label">Total posted</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value green" id="statSafe">0</span>
+              <span class="stat-label">Safe groups</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value amber" id="statSkip">0</span>
+              <span class="stat-label">Approval / skip</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value blue" id="statReview">0</span>
+              <span class="stat-label">In review</span>
+            </div>
+            <div class="stat">
+              <span class="stat-value" id="statMedia">0</span>
+              <span class="stat-label">Media files</span>
+            </div>
+          </section>
+
+          <!-- ============ ADVANCED (collapsible) ============ -->
+          <details class="accordion">
+            <summary class="accordion-toggle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>
+              <span>Account details &amp; content settings</span>
+              <span class="accordion-arrow"></span>
+            </summary>
+            <div class="accordion-body">
+
+              <!-- Accounts Overview -->
+              <section class="card accounts-card">
+                <div class="card-head">
+                  <h2>Accounts</h2>
+                  <span class="card-sub" id="acctSummary">Setup status at a glance</span>
+                  <div class="head-spacer"></div>
+                  <button id="btnAddAccount2" class="btn ghost" title="Create a new account and open a browser to log in once">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                    Add Account
+                  </button>
+                  <button id="btnImport2" class="btn outline" title="Copy your already-logged-in Chrome session">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+                    <span class="lbl">Import from Chrome</span>
+                  </button>
+                  <button id="btnManage" class="btn outline" title="Re-login, import or remove accounts">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>
+                    Manage
+                  </button>
+                </div>
+                <div id="acctOverview" class="acct-overview">
+                  <div class="recent-empty">No accounts yet. Add one to get started.</div>
+                </div>
+              </section>
+
+              <!-- Content Settings -->
+              <section class="card">
+                <div class="card-head">
+                  <h2>Content</h2>
+                  <span class="card-sub">What gets posted and with what caption</span>
+                </div>
+                <div class="field">
+                  <label for="mediaFolder">Media folder</label>
+                  <div class="input-btn">
+                    <input id="mediaFolder" type="text" placeholder="content" spellcheck="false">
+                    <button id="btnBrowseFolder" class="btn outline" title="Browse folders on this PC">Browse…</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="captionInput">Caption</label>
+                  <input id="captionInput" type="text" placeholder="Optional caption added to every post" spellcheck="true">
+                </div>
+              </section>
+
+            </div>
+          </details>
+
+        </section>
+
+        <!-- -------- GROUPS TAB -------- -->
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabGroups" data-tab="groups">
+          <div class="groups-layout">
+
+            <!-- ============ DISCOVERY ============ -->
+            <section class="card">
+              <div class="card-head">
+                <h2>Group Discovery</h2>
+                <span class="card-sub">Find new groups to classify and post into</span>
+              </div>
+              <div class="field">
+                <label for="keywordInput">Search / keyword</label>
+                <input id="keywordInput" type="text" placeholder="e.g. investments kenya — leave empty to check unclassified groups">
+              </div>
+              <div class="field-row">
+                <div class="field grow">
+                  <label>Filter mode</label>
+                  <div class="seg" id="modeSeg">
+                    <input type="radio" name="mode" id="modeSearch" value="search" checked>
+                    <label for="modeSearch">Search</label>
+                    <input type="radio" name="mode" id="modeHard" value="hard">
+                    <label for="modeHard">Hard filter</label>
+                  </div>
+                </div>
+                <div class="field w140">
+                  <label for="minMembers">Min members</label>
+                  <input id="minMembers" type="number" min="0" step="100" value="0">
+                </div>
+              </div>
+              <div class="field">
+                <button id="btnScan" class="btn primary wide">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                  Scan Groups
+                </button>
+                <div id="joinLimitStatus" class="join-limit hidden" title="Today's safe join allowance (hard stop)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  <span id="joinLimitText"></span>
+                </div>
+                <button id="btnJoinAll" class="btn outline wide" style="margin-top:8px" title="Visit every discovered group and click Join, then re-check them">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+                  Auto-Join Groups
+                </button>
+                <button id="btnCheckJoin" class="btn outline wide" style="margin-top:8px" title="Visit each group and check whether we are a member / request pending / declined">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                  Check Join Status
+                </button>
+                <div id="groupsRunControls" class="activity-controls compact hidden" style="margin-top:10px">
+                  <span class="pill running" id="grpPill">Running</span>
+                  <span class="ac-text" id="grpText">Working…</span>
+                  <span class="head-spacer"></span>
+                  <button id="btnGrpPause" class="btn outline small" title="Pause between iterations">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg> Pause
+                  </button>
+                  <button id="btnGrpStop" class="btn danger small" title="Stop after the current item">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stop
+                  </button>
+                </div>
+                <p class="hint">Hard filter keeps only groups whose <em>name</em> contains all the keyword words (any order) and that meet the member minimum. Empty keyword = re-check unclassified groups.</p>
+                <p class="hint"><strong>Auto-Join</strong> visits discovered groups, clicks Join with 30–90s random pauses, then <strong>automatically classifies each group</strong> as safe or unsafe (posts-that-require-approval are skipped on their own — no manual decision needed). A <strong>HARD safety stop</strong> caps joining at <strong>10 groups/day — this is automatic and cannot be disabled.</strong> It stops before Facebook can flag your account for "joining too fast", saves your progress, and you simply run it again tomorrow to continue. Joins happen as the identity active in this browser session — switch to your Page first if you want to join as it.</p>
+              </div>
+            </section>
+
+            <!-- ============ GROUPS TABLE ============ -->
+            <section class="card groups-card">
+              <div class="card-head">
+                <h2>Groups</h2>
+                <span class="card-sub">Classify groups before the bot posts to them</span>
+                <div class="head-spacer"></div>
+                <button id="btnRefreshGroups" class="btn ghost small" title="Reload the group list">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                  Refresh
+                </button>
+              </div>
+              <div class="tabs" id="groupTabs">
+                <button class="tab active" data-status="all">All <span class="badge" id="badgeAll">0</span></button>
+                <button class="tab" data-status="safe">Safe <span class="badge" id="badgeSafe">0</span></button>
+                <button class="tab" data-status="skip">Skip <span class="badge" id="badgeSkip">0</span></button>
+                <button class="tab" data-status="unknown">Review <span class="badge" id="badgeUnknown">0</span></button>
+              </div>
+              <div class="table-wrap">
+                <table class="groups">
+                  <thead>
+                    <tr>
+                      <th>Group</th>
+                      <th class="num">Members</th>
+                      <th>Signal</th>
+                      <th>Join status</th>
+                      <th class="num">Times posted</th>
+                      <th>Last posted</th>
+                      <th class="actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="groupsBody">
+                    <tr><td colspan="7" class="empty-cell" id="groupsEmpty">No groups yet. Run a scan to discover and classify groups.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="hint" id="groupsHint">The app classifies each group <strong>automatically</strong> when it joins or scans — Safe = posts publish immediately · Skip = posts go to admin approval (never auto-posted) · Review = couldn't decide yet. From the Safe tab you can mark a group <strong>unsafe</strong> to override the automatic decision. Join status shows membership: joined, pending, declined, or not checked yet.</p>
+            </section>
+
+          </div>
+        </section>
+
+        <!-- -------- ACTIVITY TAB -------- -->
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabActivity" data-tab="activity">
+
+          <!-- ============ RUN CONTROLS (visible when busy) ============ -->
+          <div id="activityControls" class="activity-controls hidden">
+            <div class="ac-status">
+              <span class="pill running" id="acPill">Running</span>
+              <span id="acText">Working…</span>
+            </div>
+            <div class="ac-buttons">
+              <button id="btnAcPause" class="btn outline small" title="Pause between iterations">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                Pause
+              </button>
+              <button id="btnAcStop" class="btn danger small" title="Stop after the current item">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                Stop
+              </button>
             </div>
           </div>
-          <div class="field">
-            <button id="btnScan" class="btn primary wide">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-              Scan Groups
-            </button>
-            <p class="hint">Hard filter keeps only groups whose <em>name</em> contains the keyword and that meet the member minimum. Empty keyword = re-check unclassified groups.</p>
-          </div>
-        </section>
 
-        <!-- Content -->
-        <section class="card">
-          <div class="card-head">
-            <h2>Content</h2>
-            <span class="card-sub">What gets posted and with what caption</span>
-          </div>
-          <div class="field">
-            <label for="mediaFolder">Media folder</label>
-            <div class="input-btn">
-              <input id="mediaFolder" type="text" placeholder="content" spellcheck="false">
-              <button id="btnBrowseFolder" class="btn outline" title="Browse folders on this PC">Browse…</button>
+          <!-- ============ JOURNEY STEPPER ============ -->
+          <section class="card stepper-card">
+            <div class="card-head">
+              <h2>Journey</h2>
+              <span class="card-sub" id="stepperSub">Current run progress at a glance</span>
             </div>
-          </div>
-          <div class="field">
-            <label for="captionInput">Caption</label>
-            <input id="captionInput" type="text" placeholder="Optional caption added to every post" spellcheck="true">
-          </div>
-        </section>
-      </div>
+            <div id="stepper" class="stepper" role="status" aria-live="polite"></div>
+            <div id="lastResult" class="last-result hidden"></div>
+            <div id="stepperEmpty" class="stepper-empty hidden">No job running</div>
+          </section>
 
-      <!-- ------------ RIGHT COLUMN ------------ -->
-      <div class="col">
+          <!-- ============ LIVE ACTIVITY ============ -->
+          <section class="card log-card">
+            <div class="card-head">
+              <h2>Live Activity</h2>
+              <span class="card-sub" id="logCount">0 lines</span>
+              <button id="btnCopyLog" class="btn ghost small" title="Copy all log lines to clipboard">Copy</button>
+              <button id="btnClearLog" class="btn ghost small" title="Clear the log">Clear</button>
+            </div>
+            <div id="logPanel" class="log">
+              <div class="log-empty">Waiting for activity…</div>
+            </div>
+          </section>
 
-        <!-- Run -->
-        <section class="card run-card">
-          <div class="card-head">
-            <h2>Run</h2>
-            <span class="card-sub" id="runSub">Posting engine</span>
-          </div>
-          <div class="run-buttons">
-            <button id="btnStart" class="btn success grow">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-              Start Posting
-            </button>
-            <button id="btnStop" class="btn danger" disabled>
-              <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
-              Stop
-            </button>
-          </div>
-          <div class="run-status" id="runStatus">Idle</div>
-          <div class="recent" id="recentList">
-            <div class="recent-empty">No posts yet this session.</div>
-          </div>
         </section>
 
-        <!-- Overview -->
-        <section class="stats">
-          <div class="stat">
-            <span class="stat-value accent" id="statPostedToday">0</span>
-            <span class="stat-label">Posted today</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value" id="statTotalPosted">0</span>
-            <span class="stat-label">Total posted</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value green" id="statSafe">0</span>
-            <span class="stat-label">Safe groups</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value amber" id="statSkip">0</span>
-            <span class="stat-label">Approval / skip</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value blue" id="statReview">0</span>
-            <span class="stat-label">In review</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value" id="statMedia">0</span>
-            <span class="stat-label">Media files</span>
-          </div>
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabHistory" data-tab="history">
+
+          <section class="card">
+            <div class="card-head">
+              <h2>Run History</h2>
+              <span class="card-sub" id="historySub">Every job the app has run — finished, cancelled, or left hanging.</span>
+              <button id="btnRefreshHistory" class="btn ghost small" title="Refresh history">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table class="groups history-table">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Job</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Summary</th>
+                  </tr>
+                </thead>
+                <tbody id="historyBody">
+                  <tr><td colspan="5" class="empty-cell">No runs recorded yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
         </section>
 
-        <!-- Log -->
-        <section class="card log-card">
-          <div class="card-head">
-            <h2>Live Activity</h2>
-            <span class="card-sub" id="logCount">0 lines</span>
-            <button id="btnClearLog" class="btn ghost small" title="Clear the log">Clear</button>
-          </div>
-          <div id="logPanel" class="log">
-            <div class="log-empty">Waiting for activity…</div>
-          </div>
-        </section>
       </div>
-    </div>
 
-    <!-- ============ GROUPS ============ -->
-    <section class="card groups-card">
-      <div class="card-head">
-        <h2>Groups</h2>
-        <span class="card-sub">Classify groups before the bot posts to them</span>
-        <div class="head-spacer"></div>
-        <button id="btnRefreshGroups" class="btn ghost small" title="Reload the group list">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-          Refresh
-        </button>
-      </div>
-      <div class="tabs" id="groupTabs">
-        <button class="tab active" data-status="safe">Safe Groups <span class="badge" id="badgeSafe">0</span></button>
-        <button class="tab" data-status="skip">Skip (approval) <span class="badge" id="badgeSkip">0</span></button>
-        <button class="tab" data-status="unknown">Review <span class="badge" id="badgeUnknown">0</span></button>
-      </div>
-      <div class="table-wrap">
-        <table class="groups">
-          <thead>
-            <tr>
-              <th>Group</th>
-              <th class="num">Members</th>
-              <th>Signal</th>
-              <th class="num">Times posted</th>
-              <th>Last posted</th>
-              <th class="actions">Actions</th>
-            </tr>
-          </thead>
-          <tbody id="groupsBody">
-            <tr><td colspan="6" class="empty-cell" id="groupsEmpty">No groups yet. Run a scan to discover and classify groups.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="hint" id="groupsHint">Safe = posts publish immediately · Skip = posts go to admin approval (never auto-posted) · Review = couldn't be classified yet. Select a row and use the actions to re-classify.</p>
-    </section>
-
-    <footer class="footer">
-      Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app.
-    </footer>
-  </main>
+      <footer class="footer">
+        Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app.
+      </footer>
+    </main>
+  </div>
 </div>
 
 <!-- ============ SETTINGS MODAL ============ -->
@@ -281,11 +459,53 @@
         <span class="switch"><input type="checkbox" id="setScanOnStart"><i></i></span>
       </label>
       <p class="hint">Delays are the random wait between posts. The soft cap pauses posting for the rest of the day once reached.</p>
+      <div class="settings-sub">Join Safety</div>
+      <div class="field-row">
+        <div class="field"><label for="setJoinDelayMin">Join delay min (sec)</label><input id="setJoinDelayMin" type="number" min="15" step="5"></div>
+        <div class="field"><label for="setJoinDelayMax">Join delay max (sec)</label><input id="setJoinDelayMax" type="number" min="15" step="5"></div>
+      </div>
+      <p class="hint"><strong>HARD STOP (not configurable):</strong> the app will never join more than <strong>10 groups per day</strong>, no matter what. This is a permanent safety cap that protects your account from a Facebook "joining too fast" restriction. When it's reached, the app stops, saves progress, and tells you to run Auto-Join again the next day to continue. That is the only way to resume.</p>
+      <p class="hint">Join delays are the random pause between each group join (30–90s recommended). Longer, randomized pauses look more human and are safer.</p>
     </div>
     <div class="modal-foot">
       <button class="btn ghost" data-close="modalSettings">Cancel</button>
       <button class="btn primary" id="btnSaveSettings">Save Settings</button>
     </div>
+  </div>
+</div>
+
+<!-- ============ HARD-STOP MODAL ============ -->
+<div class="modal" id="modalHardStop" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card hardstop-card">
+    <div class="hardstop-hero">
+      <div class="hardstop-shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      </div>
+      <div class="hardstop-eyebrow">ACCOUNT SAFETY · AUTO-JOIN</div>
+      <h2 class="hardstop-title">Auto-Join stopped for your own protection</h2>
+    </div>
+    <div class="modal-body">
+      <p class="hardstop-lead" id="hardStopLead"></p>
+      <div class="hardstop-facts">
+        <div class="hardstop-fact">
+          <span class="fact-icon">✓</span>
+          <div><strong>Your progress is saved.</strong><span>Not a single joined group is lost.</span></div>
+        </div>
+        <div class="hardstop-fact">
+          <span class="fact-icon">⏱</span>
+          <div><strong>Resume tomorrow.</strong><span>Run Auto-Join again any time after midnight and it continues exactly where it stopped.</span></div>
+        </div>
+        <div class="hardstop-fact">
+          <span class="fact-icon fact-warn">!</span>
+          <div><strong>This limit is automatic and fixed.</strong><span>It exists to keep your Facebook account safe and cannot be changed.</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary wide" id="btnHardStopGotIt">Got it, thanks for protecting my account</button>
+    </div>
+    <p class="hardstop-footnote">Daily limit: <strong id="hardStopCapVal">10</strong> safe joins · <span id="hardStopJoinedVal">0</span> used today</p>
   </div>
 </div>
 
@@ -306,7 +526,7 @@
     </div>
     <div class="modal-foot">
       <button class="btn ghost" data-close="modalAdd">Cancel</button>
-      <button class="btn primary" id="btnConfirmAdd">Create &amp; open browser</button>
+      <button class="btn primary" id="btnConfirmAdd">Create & open browser</button>
     </div>
   </div>
 </div>
@@ -333,7 +553,7 @@
     </div>
     <div class="modal-foot">
       <button class="btn ghost" data-close="modalImport">Cancel</button>
-      <button class="btn primary" id="btnConfirmImport">Import &amp; verify</button>
+      <button class="btn primary" id="btnConfirmImport">Import & verify</button>
     </div>
   </div>
 </div>
@@ -378,8 +598,8 @@
   </div>
 </div>
 
-<!-- toast -->
-<div id="toast" class="toast hidden"></div>
+<!-- ============ TOAST CONTAINER ============ -->
+<div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
 <script src="app.js"></script>
 </body>

@@ -10,7 +10,10 @@ in Playwright's bundled Chromium), falling back to bundled Chromium otherwise.
 """
 import os
 import shutil
+import socket
+import subprocess
 import time
+import urllib.request
 
 from playwright.sync_api import sync_playwright
 
@@ -79,6 +82,8 @@ SKIP_FILE_NAMES = {
     "Favicons", "Favicons-journal", "Web Data", "Web Data-journal",
     "Last Session", "Last Tabs", "Current Session", "Current Tabs",
     "First Run",
+    "Login Data", "Login Data-journal", "Login Data For Account",
+    "Login Data For Account-journal",
 }
 
 # File/dir names that must NEVER be copied (must always be in the skip set).
@@ -172,6 +177,172 @@ def import_chrome_session(dest_user_data_dir, chrome_user_data_dir, profile_dir,
     return skipped
 
 
+def chrome_running():
+    """True if a Chrome/Edge process is currently running.
+
+    A running browser holds its profile folders open, so an import would get
+    locked/stale files (the session cookies live in the database that Chrome
+    keeps open). Import requires Chrome to be fully closed.
+    """
+    for name in ("chrome.exe", "msedge.exe"):
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            if name in out:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _chrome_exe_path():
+    for p in CHROME_EXES + EDGE_EXES:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _wait_debug_endpoint(port, proc, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/json/version", timeout=2
+            )
+            return True
+        except Exception:
+            if proc.poll() is not None:
+                return False
+            time.sleep(0.5)
+    return False
+
+
+def launch_native_chrome(profile_dir, url, headless, log=None):
+    """Launch the user's real Chrome (subprocess, no automation flags) on a
+    profile dir with a debugging port. Returns (process, port).
+
+    This is the reliable path on modern Chrome:
+      * a native browser decrypts its own profile's cookies (app-bound
+        encryption silently defeats profile copies / Playwright relaunches),
+      * CDP reads those cookies live from the running process,
+      * it is a normal Chrome window, so Facebook does not block login.
+    """
+    log = log or (lambda msg: print(msg))
+    os.makedirs(profile_dir, exist_ok=True)
+    exe = _chrome_exe_path()
+    if not exe:
+        raise RuntimeError("Could not find Chrome or Edge on this PC.")
+    port = _free_port()
+    cmd = [
+        exe,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-mode",
+    ]
+    if headless:
+        cmd.append("--headless")
+    cmd.append(url or "about:blank")
+    log(f"Launching Chrome on profile (debug port {port})...")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not _wait_debug_endpoint(port, proc):
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(proc.pid), "/T"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Chrome could not start for this profile. Close any Chrome "
+            "windows that use the same profile and try again."
+        )
+    return proc, port
+
+
+def _close_native_chrome(proc, browser=None, user_data_dir=None):
+    """Gracefully close a native Chrome we launched (flush cookies), then
+    force-kill any leftover processes that use that profile dir."""
+    if browser is not None:
+        try:
+            for ctx in browser.contexts:
+                for pg in list(ctx.pages):
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    deadline = time.time() + 8
+    while time.time() < deadline and proc.poll() is None:
+        time.sleep(0.5)
+    if proc.poll() is None:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(proc.pid), "/T"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    if user_data_dir:
+        try:
+            _kill_chrome_on_profile(user_data_dir)
+        except Exception:
+            pass
+
+
+def _short_path(p):
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(512)
+        r = ctypes.windll.kernel32.GetShortPathNameW(p, buf, 512)
+        return buf.value if r else p
+    except Exception:
+        return p
+
+
+def _kill_chrome_on_profile(profile_dir):
+    """Force-kill any Chrome/Edge process launched on the given profile dir.
+
+    Chrome records the profile path in command lines using long or short (8.3)
+    path forms, so both are matched.
+    """
+    long_p = os.path.normpath(profile_dir)
+    short_p = _short_path(long_p)
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" "
+        "| Where-Object { $_.CommandLine -and "
+        "($_.CommandLine.Contains('" + long_p + "') -or "
+        "$_.CommandLine.Contains('" + short_p + "')) } "
+        "| ForEach-Object { $_.ProcessId }"
+    )
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=30,
+    ).stdout
+    for line in out.splitlines():
+        pid = line.strip()
+        if pid.isdigit():
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=10)
+            except Exception:
+                pass
+
+
 class FacebookBrowser:
     """Owns one persistent Playwright context backed by a Chrome profile dir."""
 
@@ -183,6 +354,9 @@ class FacebookBrowser:
         self.context = None
         self.page = None
         self.channel = None
+        self._proc = None
+        self._port = None
+        self._browser = None
 
     def _emit(self, msg):
         try:
@@ -190,39 +364,20 @@ class FacebookBrowser:
         except Exception:
             pass
 
-    def _launch_context(self, headless, viewport):
-        channel = _resolve_channel()
-        kwargs = dict(
-            user_data_dir=self.user_data_dir,
-            headless=headless,
-            args=DEFAULT_ARGS + (["--start-maximized"] if not headless else []),
-            viewport=viewport,
-            locale="en-US",
+    def _launch_cdp(self, url=None):
+        self._proc, self._port = launch_native_chrome(
+            self.user_data_dir, url, self.headless, self._emit
         )
-        if channel:
-            try:
-                self.context = self._pw.chromium.launch_persistent_context(
-                    channel=channel, **kwargs
-                )
-                self.channel = channel
-                self._emit(f"Using real {channel.capitalize()} session.")
-                return
-            except Exception as e:
-                self._emit(f"Could not use {channel} ({e}); using bundled Chromium.")
-        self.context = self._pw.chromium.launch_persistent_context(**kwargs)
-        self.channel = None
+        self._browser = self._pw.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{self._port}"
+        )
+        self.context = self._browser.contexts[0]
+        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
 
     def launch(self, url=None):
         os.makedirs(self.user_data_dir, exist_ok=True)
         self._pw = sync_playwright().start()
-        self._launch_context(
-            self.headless, {"width": 1366, "height": 900}
-        )
-        self.context.add_init_script(STEALTH_SCRIPT)
-        pages = self.context.pages
-        self.page = pages[0] if pages else self.context.new_page()
-        if url:
-            self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        self._launch_cdp(url)
         return self.page
 
     def is_logged_in(self, timeout_ms=30000):
@@ -257,6 +412,14 @@ class FacebookBrowser:
                 self.context.close()
         except Exception as e:
             self._emit(f"browser close warning: {e}")
+        if self._proc is not None:
+            _close_native_chrome(self._proc, self._browser, self.user_data_dir)
+            self._proc = None
+        try:
+            if self._browser:
+                self._browser.close()
+        except Exception:
+            pass
         try:
             if self._pw:
                 self._pw.stop()
@@ -268,71 +431,57 @@ class FacebookBrowser:
 
 
 def open_login(user_data_dir, log=None, verify=True):
-    """Open a visible browser for one-time Facebook login into a profile.
+    """Open a real Chrome window (no automation flags) on the profile for
+    one-time Facebook login.
 
-    Blocks while the user logs in (including completing two-step verification
-    if asked). Returns after the user closes the window. If verify is True, a
-    quick headless check confirms the saved session afterwards.
+    Blocks while the user logs in (including two-step verification if asked),
+    watching for the c_user cookie. Returns True when a session was detected,
+    False otherwise. If verify is True, a quick headless check runs afterwards.
     """
     log = log or (lambda msg: print(msg))
     os.makedirs(user_data_dir, exist_ok=True)
+    proc, port = launch_native_chrome(
+        user_data_dir, "https://www.facebook.com/login/", headless=False, log=log
+    )
+    log("A normal Chrome window opened for login. Log into Facebook there "
+        "(complete two-step verification if asked). It will close on its own "
+        "once the session is detected.")
     pw = sync_playwright().start()
-    channel = _resolve_channel()
-    kwargs = dict(
-        user_data_dir=user_data_dir,
-        headless=False,
-        args=DEFAULT_ARGS,
-        viewport={"width": 1280, "height": 850},
-        locale="en-US",
-    )
-    context = None
-    if channel:
+    browser = None
+    logged_in = False
+    try:
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        ctx = browser.contexts[0]
+        deadline = time.time() + 15 * 60
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                cookies = ctx.cookies()
+                if any(c["name"] == "c_user" and c.get("value") for c in cookies):
+                    time.sleep(5)
+                    still = ctx.cookies()
+                    if any(c["name"] == "c_user" and c.get("value") for c in still):
+                        logged_in = True
+                        break
+            except Exception:
+                pass
+            time.sleep(2)
+        if logged_in:
+            log("Facebook login detected. Saving the session.")
+        else:
+            log("No Facebook login detected before the window was closed.")
+    finally:
+        _close_native_chrome(proc, browser, user_data_dir)
         try:
-            context = pw.chromium.launch_persistent_context(channel=channel, **kwargs)
-            log(f"Using real {channel.capitalize()} session.")
-        except Exception:
-            context = None
-    if context is None:
-        context = pw.chromium.launch_persistent_context(**kwargs)
-    context.add_init_script(STEALTH_SCRIPT)
-    page = context.pages[0] if context.pages else context.new_page()
-    log(
-        "A browser opened for login. Log into Facebook. If two-step "
-        "verification appears, complete it. Then close the window."
-    )
-    page.goto("https://www.facebook.com/login/", wait_until="domcontentloaded", timeout=60000)
-    # Heartbeat: report the URL every 5s so a stuck step is visible in the log.
-    import threading
-    stop_beat = threading.Event()
-
-    def heartbeat():
-        try:
-            while not stop_beat.is_set() and context.pages and not context.pages[0].is_closed():
-                try:
-                    u = page.url
-                    if u and "facebook.com" in u:
-                        log(f"[page] {u}")
-                except Exception:
-                    pass
-                time.sleep(5)
+            if browser is not None:
+                browser.close()
         except Exception:
             pass
-
-    threading.Thread(target=heartbeat, daemon=True).start()
-    try:
-        while context.pages and not context.pages[0].is_closed():
-            time.sleep(1)
-    except Exception:
-        pass
-    stop_beat.set()
-    try:
-        context.close()
-    except Exception:
-        pass
-    try:
-        pw.stop()
-    except Exception:
-        pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
     log("Login window closed.")
     if verify:
         fb = FacebookBrowser(user_data_dir, headless=True, log=log)
@@ -340,8 +489,9 @@ def open_login(user_data_dir, log=None, verify=True):
             fb.launch()
             ok = fb.is_logged_in(timeout_ms=30000)
             log("Session verified: logged in." if ok else
-                "Session NOT logged in yet. Try again or import your Chrome profile.")
+                "Session NOT logged in yet. Try the login window again.")
         except Exception as e:
             log(f"Could not verify session: {e}")
         finally:
             fb.close()
+    return logged_in

@@ -12,10 +12,13 @@ thread exactly as before. This module only:
     frontend can surface every failure mode clearly (missing profile, not
     logged in, import running/failed, login window open, ...).
 """
+import html
 import itertools
 import json
 import os
 import string
+import subprocess
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,13 +27,39 @@ from urllib.parse import parse_qs, urlparse
 from .browser import (
     FacebookBrowser,
     find_chrome_user_data_dir,
-    import_chrome_session,
+        import_chrome_session,
+    chrome_running,
     list_chrome_profiles,
     open_login,
 )
 from .config import BASE_DIR, Config
-from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, Database
+from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
 from .worker import MEDIA_EXTS, Worker
+
+
+def send_toast(title: str, body: str):
+    """Fire a Windows toast notification via PowerShell (detached, non-blocking)."""
+    # Escape for PowerShell -Command string
+    t = html.escape(title).replace("'", "''")
+    b = html.escape(body).replace("'", "''")
+    ps = f'''
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
+    $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
+    $text = $xml.GetElementsByTagName("text")
+    $text[0].AppendChild($xml.CreateTextNode('{t}')) | Out-Null
+    $text[1].AppendChild($xml.CreateTextNode('{b}')) | Out-Null
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+    # optional: add audio (default sound plays automatically)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Group Post Automator").Show($toast)
+    '''
+    # Run detached, hide window, no wait
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
@@ -77,7 +106,7 @@ class AutomationState:
     def __init__(self):
         self.config = Config()
         self.db = Database()
-        self.worker = Worker(self.config, self.db, log=self._push_log)
+        self.worker = Worker(self.config, self.db, log=self._push_log, notify=send_toast)
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._log_lines = []  # list of (id, text, level)
@@ -113,13 +142,14 @@ class AutomationState:
         return last if last in names else (names[0] if names else None)
 
     def _profile_status(self, name):
-        """Diagnostic state for one account — surfaces the 'can't fetch the
-        profile' scenario instead of failing silently."""
+        """Setup status for one account — what's ready and what still needs
+        attention, so the UI can show accounts that are fully set up."""
         profile = self.config.get_profile(name)
         if not profile:
             return {"code": "missing", "label": "Profile not found",
                     "detail": f"No account named '{name}' is configured.",
-                    "dir_exists": False, "cookies": False, "stored": ""}
+                    "dir_exists": False, "cookies": False, "stored": "",
+                    "ready": False, "ready_count": 0, "setup_total": 5, "setup": []}
         udd = profile["user_data_dir"]
         dir_exists = os.path.isdir(udd)
         cookies = os.path.exists(os.path.join(udd, "Default", "Network", "Cookies"))
@@ -136,9 +166,48 @@ class AutomationState:
             code, label = "never_checked", "Session not checked yet"
         else:
             code, label = "no_session", "No session files"
+
+        s = self.config.settings
+        media_folder = (s.get("media_folder") or "").strip()
+        media_ok = False
+        if media_folder:
+            # resolve relative paths against the workspace root, same as worker
+            media_path = os.path.abspath(os.path.join(BASE_DIR, media_folder))
+            if os.path.isdir(media_path):
+                try:
+                    media_ok = any(
+                        os.path.splitext(f)[1].lower() in MEDIA_EXTS
+                        for f in os.listdir(media_path)
+                    )
+                except OSError:
+                    media_ok = False
+        delay_min = _to_int(s.get("delay_min"), 0)
+        delay_max = _to_int(s.get("delay_max"), 0)
+        delay_ok = delay_min > 0 and delay_max >= delay_min
+        safe_count = self.db.count_groups(STATUS_SAFE)
+        logged_ok = stored == "ok"
+
+        media_hint = media_folder or "Set a media folder in Content"
+        if media_folder:
+            media_hint += f" ({os.path.abspath(os.path.join(BASE_DIR, media_folder))})"
+        setup = [
+            {"key": "login", "label": "Logged into Facebook", "ok": logged_ok,
+             "hint": "One-time login via the opened Chrome window"},
+            {"key": "folder", "label": "Profile folder", "ok": dir_exists,
+             "hint": "Account profile exists on disk"},
+            {"key": "media", "label": "Media folder ready", "ok": media_ok,
+             "hint": media_hint},
+            {"key": "groups", "label": "Safe groups", "ok": safe_count > 0,
+             "hint": f"{safe_count} group(s) classified as safe — run a scan"},
+            {"key": "delay", "label": "Post delay set", "ok": delay_ok,
+             "hint": f"{delay_min}–{delay_max}s between posts"},
+        ]
+        ready = all(x["ok"] for x in setup)
         detail = f"Session check: {stored or 'not run'}  •  Cookies present: {cookies}"
         return {"code": code, "label": label, "detail": detail,
-                "dir_exists": dir_exists, "cookies": cookies, "stored": stored}
+                "dir_exists": dir_exists, "cookies": cookies, "stored": stored,
+                "ready": ready, "ready_count": sum(1 for x in setup if x["ok"]),
+                "setup_total": len(setup), "setup": setup}
 
     def _system(self, selected):
         """The prominent banner shown above the dashboard."""
@@ -321,6 +390,120 @@ class AutomationState:
         self.worker.stop()
         return {"ok": True}
 
+    def cmd_pause(self, data):
+        if self.worker.pause():
+            self._push_log("Job paused.")
+            return {"ok": True}
+        return {"ok": False, "error": "Nothing to pause."}
+
+    def cmd_unpause(self, data):
+        if self.worker.unpause():
+            self._push_log("Job resumed.")
+            return {"ok": True}
+        return {"ok": False, "error": "Not paused."}
+
+    def cmd_join_all(self, data):
+        guard = self._banner_guard()
+        if guard:
+            return guard
+        profile = data.get("profile") or self._selected_name() or ""
+        if not profile:
+            return {"ok": False, "error": "No account selected."}
+        if not self.db.count_groups():
+            return {"ok": False, "error": "No discovered groups yet — run a scan first."}
+        self.config.set("last_profile", profile)
+        ok = self.worker.start_join(profile)
+        if ok:
+            self._push_log("Auto-join started...")
+        return {"ok": ok, "busy": self.worker.is_busy(),
+                "error": None if ok else "Could not start — see the log."}
+
+    def cmd_check_join(self, data):
+        guard = self._banner_guard()
+        if guard:
+            return guard
+        profile = data.get("profile") or self._selected_name() or ""
+        if not profile:
+            return {"ok": False, "error": "No account selected."}
+        if not self.db.count_groups():
+            return {"ok": False, "error": "No discovered groups yet — run a scan first."}
+        self.config.set("last_profile", profile)
+        ok = self.worker.start_check(profile)
+        if ok:
+            self._push_log("Join-status check started...")
+        return {"ok": ok, "busy": self.worker.is_busy(),
+                "error": None if ok else "Could not start — see the log."}
+
+    def _interrupted_job(self):
+        """A job that was running when the app last died (crash/power loss).
+
+        A live run also writes active_job — so anything while the worker is
+        busy is NOT an interruption and must never surface as one.
+        """
+        if self.worker.is_busy():
+            return None
+        raw = self.db.get_state("active_job", "") or ""
+        if not raw:
+            return None
+        try:
+            job = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(job, dict) or not job.get("type"):
+            return None
+        prog_raw = self.db.get_state("join_progress", "") or ""
+        try:
+            prog = json.loads(prog_raw) if prog_raw else {}
+        except Exception:
+            prog = {}
+        job["progress"] = prog if isinstance(prog, dict) else {}
+
+        # Record a stale (crash / power-loss) run into History exactly once so
+        # the user can see it was left hanging. Keyed off the started_at so a
+        # worker that finishes normally (clearing active_job) never triggers it.
+        started = job.get("started_at") or ""
+        mark = f"interrupt_recorded:{started}"
+        if started and not self.db.get_state(mark, ""):
+            self.db.set_state(mark, "1")
+            self.db.add_history(
+                job.get("type"),
+                job.get("profile") or self._selected_name() or "",
+                "interrupted",
+                "Interrupted (app stopped or lost power while this run was active)",
+                prog.get("done") if isinstance(prog.get("done"), int) else None,
+                prog.get("total") if isinstance(prog.get("total"), int) else None,
+                started,
+                None,
+            )
+        return job
+
+    def cmd_resume(self, data):
+        job = self._interrupted_job()
+        if not job:
+            return {"ok": False, "error": "Nothing to resume."}
+        profile = job.get("profile") or self._selected_name() or ""
+        jtype = job["type"]
+        if jtype == "join":
+            ok = self.worker.start_join(profile)
+        elif jtype == "scan":
+            ok = self.worker.start_scan(profile, "", "search", 0)
+        elif jtype == "check":
+            ok = self.worker.start_check(profile)
+        elif jtype == "run":
+            ok = self.worker.start_run(profile)
+        else:
+            return {"ok": False, "error": f"Unknown job type '{jtype}'."}
+        if ok:
+            self._push_log(f"Resuming interrupted {jtype} run...")
+        return {"ok": ok, "error": None if ok else "Could not start — see the log."}
+
+    def cmd_discard_interrupted(self, data):
+        self.db.set_state("active_job", "")
+        self.db.set_state("join_done", "")
+        self.db.set_state("join_progress", "")
+        self._push_log("Interrupted-run state cleared.")
+        return {"ok": True}
+
     def cmd_add_account(self, data):
         name = str(data.get("name") or "").strip()
         if not name:
@@ -365,24 +548,47 @@ class AutomationState:
 
         def job():
             try:
-                import_chrome_session(profile["user_data_dir"], chrome_dir, chrome_profile, self._push_log)
+                if chrome_running():
+                    raise RuntimeError(
+                        "Chrome is currently open. Close it fully (all windows and the "
+                        "tray icon), then click Import again."
+                    )
+                skipped = import_chrome_session(profile["user_data_dir"], chrome_dir, chrome_profile, self._push_log)
+                if skipped:
+                    self._push_log(f"WARNING: {len(skipped)} locked file(s) skipped. "
+                                   "Close Chrome fully and import again for a complete session.")
             except Exception as e:
                 self._push_log(f"Import failed: {e}")
                 with self._lock:
                     self.import_state.update(running=False, result="failed", message=str(e))
                 return
-            cookies = os.path.join(profile["user_data_dir"], "Default", "Network", "Cookies")
-            if not os.path.exists(cookies):
-                self._push_log("IMPORTANT: Chrome's cookie file could not be copied because Chrome is "
-                               "still open. Close Chrome fully, then run Import again for this account.")
-                with self._lock:
-                    self.import_state.update(running=False, result="failed",
-                                             message="Cookie file could not be copied. Close Chrome fully and import again.")
-                return
             self._push_log("Import done. Verifying the session...")
+            fb = FacebookBrowser(profile["user_data_dir"], headless=True, log=self._push_log)
+            ok = False
+            try:
+                fb.launch()
+                ok = fb.is_logged_in(timeout_ms=45000)
+            except Exception as e:
+                self._push_log(f"Session check failed: {e}")
+            finally:
+                fb.close()
+            if ok:
+                self.db.set_state(f"session_verified:{name}", "ok")
+                self._push_log("Session verified: logged in. You can start posting.")
+                with self._lock:
+                    self.import_state.update(running=False, result="done",
+                                             message="Imported and logged in.")
+                return
+            self._push_log(
+                "The copied profile is not logged into Facebook. Modern Chrome "
+                "encrypts its session cookies, so a copy can't carry the login. "
+                "A normal Chrome window will open instead so you can log in once "
+                "on this account (no passwords are stored by the app)."
+            )
             with self._lock:
-                self.import_state.update(running=False, result="done", message="Profile copied.")
-            self._start_verify(name)
+                self.import_state.update(running=False, result="login",
+                                         message="Log in in the opened Chrome window.")
+            self._start_login(profile)
 
         threading.Thread(target=job, daemon=True).start()
         return {"ok": True}
@@ -410,7 +616,8 @@ class AutomationState:
     def cmd_settings(self, data):
         s = self.config.settings
         updates = {}
-        for key in ("delay_min", "delay_max", "soft_cap", "max_cycle_posts", "min_members"):
+        for key in ("delay_min", "delay_max", "soft_cap", "max_cycle_posts", "min_members",
+                    "join_delay_min", "join_delay_max"):
             if key in data:
                 updates[key] = _to_int(data[key], _to_int(s.get(key), 0))
         if "headless" in data:
@@ -462,11 +669,14 @@ class AutomationState:
     def groups_json(self, status="all"):
         rows = self.db.get_groups(None if status == "all" else status)
         keys = ("id", "name", "member_count", "approval_signal", "times_posted",
-                "last_posted_at", "status", "url")
+                "last_posted_at", "status", "url", "join_status", "join_checked_at")
         return {"groups": [{k: g.get(k) for k in keys} for g in rows]}
 
     def posts_json(self, limit=8):
         return {"posts": self.db.recent_posts(max(1, min(limit, 200)))}
+
+    def history_json(self, limit=200):
+        return {"ok": True, "history": self.db.get_history(max(1, min(limit, 1000)))}
 
     def chrome_profiles_json(self):
         d = find_chrome_user_data_dir()
@@ -496,7 +706,11 @@ class AutomationState:
         return {"ok": True, "path": p, "parent": parent, "dirs": dirs, "selectable": True}
 
     def state_json(self):
-        profiles = [dict(p) for p in self.config.profiles]
+        profiles = []
+        for p in self.config.profiles:
+            d = dict(p)
+            d["status"] = self._profile_status(p["name"])
+            profiles.append(d)
         names = [p["name"] for p in profiles]
         selected = self.config.get("last_profile", "")
         if selected not in names:
@@ -515,11 +729,43 @@ class AutomationState:
             "skip": self.db.count_groups(STATUS_SKIP),
             "unknown": self.db.count_groups(STATUS_UNKNOWN),
             "total": self.db.count_groups(),
+            "joined": self.db.count_groups(JOIN_JOINED),
+            "join_pending": self.db.count_groups(JOIN_PENDING),
+            "join_declined": self.db.count_groups(JOIN_DECLINED),
+            "not_joined": self.db.count_groups(JOIN_NOT_JOINED),
         }
+        w = self.worker
+        # join progress comes from the database so it survives interruptions
+        jp = None
+        try:
+            raw = self.db.get_state("join_progress", "") or ""
+            jp = json.loads(raw) if raw else None
+            if not isinstance(jp, dict):
+                jp = None
+        except Exception:
+            jp = None
+        # durable hard-stop notice (survives app restarts)
+        hard_stop = None
+        try:
+            hs = self.db.get_state("hard_stop", "") or ""
+            hard_stop = json.loads(hs) if hs else None
+            if not isinstance(hard_stop, dict):
+                hard_stop = None
+        except Exception:
+            hard_stop = None
+
         return {
             "ok": True,
-            "busy": self.worker.is_busy(),
-            "job": self.worker.job,
+            "busy": w.is_busy(),
+            "paused": getattr(w, "paused", False),
+            "job": w.job,
+            "status_text": getattr(w, "status_text", ""),
+            "stage": getattr(w, "stage", None),
+            "stage_detail": getattr(w, "stage_detail", ""),
+            "join_progress": jp,
+            "join_today": self.db.joins_today(),
+            "hard_stop": hard_stop,
+            "last_result": getattr(w, "last_result", None),
             "profiles": profiles,
             "selected": sel,
             "settings": dict(self.config.settings),
@@ -532,6 +778,7 @@ class AutomationState:
             "login": login,
             "import": imp,
             "verify": verify,
+            "interrupted_job": self._interrupted_job(),
             "system": self._system(selected),
         }
 
@@ -585,31 +832,38 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ------------------------------------------------------------------
     def do_GET(self):
-        u = urlparse(self.path)
-        p = u.path
-        q = parse_qs(u.query)
-        if p == "/api/state":
-            return self._json(200, self.st.state_json())
-        if p == "/api/logs":
-            since = _to_int((q.get("since") or ["0"])[0], 0)
-            return self._json(200, self.st.logs_json(since))
-        if p == "/api/groups":
-            status = (q.get("status") or ["all"])[0]
-            return self._json(200, self.st.groups_json(status))
-        if p == "/api/posts":
-            limit = _to_int((q.get("limit") or ["8"])[0], 8)
-            return self._json(200, self.st.posts_json(limit))
-        if p == "/api/chrome_profiles":
-            return self._json(200, self.st.chrome_profiles_json())
-        if p == "/api/browse":
-            path = (q.get("path") or [""])[0]
-            return self._json(200, self.st.list_dir(path))
-        if p == "/favicon.ico":
-            return self._send(204, "text/plain", b"")
-        if p in ("/", "/index.html", "/style.css", "/app.js"):
-            code, ctype, body = self.st.serve_static(p)
-            return self._send(code, ctype, body)
-        return self._json(404, {"ok": False, "error": "unknown endpoint"})
+        try:
+            u = urlparse(self.path)
+            p = u.path
+            q = parse_qs(u.query)
+            if p == "/api/state":
+                return self._json(200, self.st.state_json())
+            if p == "/api/logs":
+                since = _to_int((q.get("since") or ["0"])[0], 0)
+                return self._json(200, self.st.logs_json(since))
+            if p == "/api/groups":
+                status = (q.get("status") or ["all"])[0]
+                return self._json(200, self.st.groups_json(status))
+            if p == "/api/posts":
+                limit = _to_int((q.get("limit") or ["8"])[0], 8)
+                return self._json(200, self.st.posts_json(limit))
+            if p == "/api/history":
+                limit = _to_int((q.get("limit") or ["200"])[0], 200)
+                return self._json(200, self.st.history_json(limit))
+            if p == "/api/chrome_profiles":
+                return self._json(200, self.st.chrome_profiles_json())
+            if p == "/api/browse":
+                path = (q.get("path") or [""])[0]
+                return self._json(200, self.st.list_dir(path))
+            if p == "/favicon.ico":
+                return self._send(204, "text/plain", b"")
+            if p in ("/", "/index.html", "/style.css", "/app.js"):
+                code, ctype, body = self.st.serve_static(p)
+                return self._send(code, ctype, body)
+            return self._json(404, {"ok": False, "error": "unknown endpoint"})
+        except Exception as e:
+            self.st._push_log(f"API error on GET {self.path}: {e}")
+            return self._json(500, {"ok": False, "error": str(e)})
 
     # -- POST ------------------------------------------------------------------
     def do_POST(self):
@@ -618,7 +872,13 @@ class Handler(BaseHTTPRequestHandler):
         handlers = {
             "/api/start": self.st.cmd_start,
             "/api/scan": self.st.cmd_scan,
+            "/api/join_all": self.st.cmd_join_all,
+            "/api/check_join": self.st.cmd_check_join,
+            "/api/resume": self.st.cmd_resume,
+            "/api/discard_interrupted": self.st.cmd_discard_interrupted,
             "/api/stop": self.st.cmd_stop,
+            "/api/pause": self.st.cmd_pause,
+            "/api/unpause": self.st.cmd_unpause,
             "/api/add_account": self.st.cmd_add_account,
             "/api/relogin": self.st.cmd_relogin,
             "/api/import_chrome": self.st.cmd_import_chrome,
@@ -655,20 +915,23 @@ def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
         raise RuntimeError("Could not find a free port for the web UI.")
     server.state = state
     url = f"http://{host}:{server.server_port}/"
-    print("=" * 62)
-    print("  Group Post Automator  -  local web UI")
-    print(f"  {url}")
-    print("  Close this window or press Ctrl+C to quit.")
-    print("=" * 62)
+    if sys.stdout:
+        print("=" * 62)
+        print("  Group Post Automator  -  local web UI")
+        print(f"  {url}")
+        print("  Close this window or press Ctrl+C to quit.")
+        print("=" * 62)
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url, new=1)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        if sys.stdout:
+            print("\nShutting down...")
     finally:
         if state.worker.is_busy():
-            print("Stopping worker...")
+            if sys.stdout:
+                print("Stopping worker...")
             state.worker.stop()
         state.db.close()
         server.server_close()
