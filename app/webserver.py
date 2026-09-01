@@ -34,7 +34,8 @@ from .browser import (
 )
 from .config import BASE_DIR, Config
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
-from .worker import MEDIA_EXTS, Worker
+from .worker import MEDIA_EXTS, VIDEO_EXTS, Worker
+VIDEO_EXTS_SET = VIDEO_EXTS or set()
 
 
 def send_toast(title: str, body: str):
@@ -68,6 +69,11 @@ MIME = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".webm": "video/webm", ".wmv": "video/x-ms-wmv",
+    ".m4v": "video/x-m4v",
 }
 
 LOG_LEVELS = ("posted", "pending", "failed", "check", "warn", "info")
@@ -434,6 +440,58 @@ class AutomationState:
         return {"ok": ok, "busy": self.worker.is_busy(),
                 "error": None if ok else "Could not start — see the log."}
 
+    def cmd_sync(self, data):
+        guard = self._banner_guard()
+        if guard:
+            return guard
+        profile = data.get("profile") or self._selected_name() or ""
+        if not profile:
+            return {"ok": False, "error": "No account selected."}
+        self.config.set("last_profile", profile)
+        ok = self.worker.start_sync(profile)
+        if ok:
+            self._push_log("Syncing your full Facebook groups list...")
+        return {"ok": ok, "busy": self.worker.is_busy(),
+                "error": None if ok else "Could not start — see the log."}
+
+    def cmd_blast(self, data):
+        guard = self._banner_guard()
+        if guard:
+            return guard
+        profile = data.get("profile") or self._selected_name() or ""
+        if not profile:
+            return {"ok": False, "error": "No account selected."}
+        batch = _to_int(data.get("batch"), 10)
+        if batch < 1:
+            batch = 10
+        # The caption arrives with the request (browser-held, not stored).
+        caption = str(data.get("caption") or "")
+        self.config.set("last_profile", profile)
+        ok = self.worker.start_blast(profile, batch, caption)
+        if ok:
+            self._push_log(f"Batch posting started: {batch} group(s) per press...")
+        return {"ok": ok, "busy": self.worker.is_busy(),
+                "error": None if ok else "Could not start — see the log."}
+
+    def cmd_page_post(self, data):
+        guard = self._banner_guard()
+        if guard:
+            return guard
+        profile = data.get("profile") or self._selected_name() or ""
+        if not profile:
+            return {"ok": False, "error": "No account selected."}
+        page_url = str(data.get("page_url") or "").strip()
+        if not page_url:
+            return {"ok": False, "error": "No Page URL provided."}
+        caption = str(data.get("caption") or "")
+        file_name = str(data.get("file_name") or "")
+        self.config.set("last_profile", profile)
+        ok = self.worker.start_page_post(profile, page_url, caption, file_name)
+        if ok:
+            self._push_log(f"Page posting started: {page_url}")
+        return {"ok": ok, "busy": self.worker.is_busy(),
+                "error": None if ok else "Could not start — see the log."}
+
     def _interrupted_job(self):
         """A job that was running when the app last died (crash/power loss).
 
@@ -489,6 +547,10 @@ class AutomationState:
             ok = self.worker.start_scan(profile, "", "search", 0)
         elif jtype == "check":
             ok = self.worker.start_check(profile)
+        elif jtype == "sync":
+            ok = self.worker.start_sync(profile)
+        elif jtype == "blast":
+            ok = self.worker.start_blast(profile)
         elif jtype == "run":
             ok = self.worker.start_run(profile)
         else:
@@ -624,10 +686,10 @@ class AutomationState:
             updates["headless"] = bool(data["headless"])
         if "scan_on_start" in data:
             updates["scan_on_start"] = bool(data["scan_on_start"])
+        if "developer_mode" in data:
+            updates["developer_mode"] = bool(data["developer_mode"])
         if "media_folder" in data and str(data.get("media_folder") or "").strip():
             updates["media_folder"] = str(data["media_folder"]).strip()
-        if "caption" in data:
-            updates["caption"] = str(data.get("caption") or "")
         if updates:
             self.config.update_settings(**updates)
             self._push_log("Settings saved.")
@@ -691,7 +753,13 @@ class AutomationState:
         p = os.path.abspath(str(path))
         if not os.path.isdir(p):
             return {"ok": False, "error": f"Not a folder: {path}"}
-        parent = os.path.dirname(p) if os.path.dirname(p) != p else None
+        # A drive root (e.g. C:\) has no parent directory — surface "" so the
+        # UI can climb back out to the drive list ("This PC") and keep full
+        # navigation freedom to any drive/folder on the machine.
+        if os.path.dirname(p) == p:
+            parent = ""
+        else:
+            parent = os.path.dirname(p) if os.path.dirname(p) != p else None
         try:
             entries = sorted(os.listdir(p))
         except OSError as e:
@@ -704,6 +772,54 @@ class AutomationState:
             except OSError:
                 continue
         return {"ok": True, "path": p, "parent": parent, "dirs": dirs, "selectable": True}
+
+    def list_media(self):
+        """List the image/video files in the configured media folder.
+
+        Used by the frontend Content composer so the user can see and select
+        which file(s) to post. Returns each media file's absolute path, its
+        file name, and whether it is an image or a video.
+        """
+        folder = self.config.settings.get("media_folder", "content")
+        root = os.path.abspath(os.path.join(BASE_DIR, folder))
+        # Make sure the media folder exists so the composer's picker has a real,
+        # browseable location — the UI currently shows an "empty folder" state
+        # (no tiles to click) when the folder is missing.
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError:
+            pass
+        files = []
+        if os.path.isdir(root):
+            for name in sorted(os.listdir(root)):
+                full = os.path.join(root, name)
+                if os.path.isfile(full):
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in MEDIA_EXTS:
+                        files.append({
+                            "name": name,
+                            "path": full,
+                            "folder": folder,
+                            "is_video": ext in VIDEO_EXTS_SET,
+                        })
+        return {"ok": True, "folder": folder, "root": root,
+                "exists": os.path.isdir(root), "files": files}
+
+    def serve_media(self, path):
+        """Serve a single image/video file (by absolute path) for previewing.
+
+        Only media files are served — the extension must be a known image or
+        video extension, which keeps this local endpoint safe.
+        """
+        p = os.path.abspath(str(path))
+        ext = os.path.splitext(p)[1].lower()
+        if ext not in MEDIA_EXTS or not os.path.isfile(p):
+            return 404, "text/plain; charset=utf-8", b"not found"
+        try:
+            with open(p, "rb") as fh:
+                return 200, MIME.get(ext, "application/octet-stream"), fh.read()
+        except OSError:
+            return 404, "text/plain; charset=utf-8", b"not found"
 
     def state_json(self):
         profiles = []
@@ -729,10 +845,10 @@ class AutomationState:
             "skip": self.db.count_groups(STATUS_SKIP),
             "unknown": self.db.count_groups(STATUS_UNKNOWN),
             "total": self.db.count_groups(),
-            "joined": self.db.count_groups(JOIN_JOINED),
-            "join_pending": self.db.count_groups(JOIN_PENDING),
-            "join_declined": self.db.count_groups(JOIN_DECLINED),
-            "not_joined": self.db.count_groups(JOIN_NOT_JOINED),
+            "joined": self.db.count_by_join_status(JOIN_JOINED),
+            "join_pending": self.db.count_by_join_status(JOIN_PENDING),
+            "join_declined": self.db.count_by_join_status(JOIN_DECLINED),
+            "not_joined": self.db.count_by_join_status(JOIN_NOT_JOINED),
         }
         w = self.worker
         # join progress comes from the database so it survives interruptions
@@ -754,6 +870,45 @@ class AutomationState:
         except Exception:
             hard_stop = None
 
+        # durable batch-posting progress (survives app restarts)
+        blast_progress = None
+        try:
+            bp = self.db.get_state("blast_progress", "") or ""
+            blast_progress = json.loads(bp) if bp else None
+            if not isinstance(blast_progress, dict):
+                blast_progress = None
+        except Exception:
+            blast_progress = None
+        try:
+            bd_raw = self.db.get_state("blast_done", "") or ""
+            blast_done = json.loads(bd_raw) if bd_raw else []
+            if not isinstance(blast_done, list):
+                blast_done = []
+        except Exception:
+            blast_done = []
+
+        # groups actually posted to in the current batch cycle (id+name+members)
+        try:
+            br_raw = self.db.get_state("blast_result", "") or ""
+            blast_result = json.loads(br_raw) if br_raw else []
+            if not isinstance(blast_result, list):
+                blast_result = []
+        except Exception:
+            blast_result = []
+        inmem = getattr(w, "blast_posted", None)
+        if inmem:
+            blast_result = list(inmem)
+
+        # last "scrape my groups" result (count + full found list)
+        sync_result = None
+        try:
+            sr = self.db.get_state("sync_result", "") or ""
+            sync_result = json.loads(sr) if sr else None
+            if not isinstance(sync_result, dict):
+                sync_result = None
+        except Exception:
+            sync_result = None
+
         return {
             "ok": True,
             "busy": w.is_busy(),
@@ -765,6 +920,10 @@ class AutomationState:
             "join_progress": jp,
             "join_today": self.db.joins_today(),
             "hard_stop": hard_stop,
+            "blast_progress": blast_progress,
+            "blast_done": blast_done,
+            "blast_result": blast_result,
+            "sync_result": sync_result,
             "last_result": getattr(w, "last_result", None),
             "profiles": profiles,
             "selected": sel,
@@ -809,7 +968,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client disconnected mid-write (e.g. closed the tab or aborted a
+            # poll while the page was navigating). WinError 10053/10054 and
+            # broken pipes here are normal, NOT real API errors — swallow them
+            # so they never surface as scary "API error" lines in the log.
             pass
 
     def _json(self, code, obj):
@@ -855,6 +1018,12 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/browse":
                 path = (q.get("path") or [""])[0]
                 return self._json(200, self.st.list_dir(path))
+            if p == "/api/media":
+                return self._json(200, self.st.list_media())
+            if p == "/api/media_file":
+                path = (q.get("path") or [""])[0]
+                code, ctype, body = self.st.serve_media(path)
+                return self._send(code, ctype, body)
             if p == "/favicon.ico":
                 return self._send(204, "text/plain", b"")
             if p in ("/", "/index.html", "/style.css", "/app.js"):
@@ -874,6 +1043,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/scan": self.st.cmd_scan,
             "/api/join_all": self.st.cmd_join_all,
             "/api/check_join": self.st.cmd_check_join,
+            "/api/sync": self.st.cmd_sync,
+            "/api/blast": self.st.cmd_blast,
+            "/api/page_post": self.st.cmd_page_post,
             "/api/resume": self.st.cmd_resume,
             "/api/discard_interrupted": self.st.cmd_discard_interrupted,
             "/api/stop": self.st.cmd_stop,

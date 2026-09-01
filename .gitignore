@@ -17,6 +17,9 @@ data/
 profiles/
 content/
 
+# Local scratch/helper folder
+.freebuff/
+
 # Playwright
 test-results/
 playwright-report/

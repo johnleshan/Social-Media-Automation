@@ -14,6 +14,7 @@ Job progress is persisted to the database (run_state) so an interrupted run
 import json
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime
@@ -21,9 +22,9 @@ from datetime import datetime
 from .approval import check_group, check_membership_status
 from .browser import FacebookBrowser
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED
-from .discovery import search_groups
+from .discovery import search_groups, list_my_groups, extract_group_info_from_page
 from .joiner import join_group
-from .poster import post_media
+from .poster import post_media, post_media_to_page
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".m4v"}
@@ -36,6 +37,52 @@ CHECKPOINT_PHRASES = [
     "account confirmation",
     "we need to confirm",
 ]
+
+# List/feed page titles that are NOT a single group's name. When the enrichment
+# bounces off a group URL onto one of these, the extracted "name" is garbage.
+_GENERIC_TITLE_RE = re.compile(
+    r"^(?:all groups you'?ve joined|groups|group|your groups|discover|explore"
+    r"|suggested|home|facebook)\b.*",
+    re.IGNORECASE,
+)
+
+
+def _is_generic_title(name):
+    name = (name or "").strip()
+    if not name:
+        return True
+    if _GENERIC_TITLE_RE.match(name):
+        return True
+    # numeric-only names are usually group ids, not real names
+    if re.fullmatch(r"\d[\d\s.,]*", name):
+        return True
+    return False
+
+
+def _looks_like_group_page(final_url, target_id):
+    """Best-effort check that `final_url` is a single group page (not the
+    groups feed / joins list) that at least plausibly matches the target."""
+    if not final_url:
+        return False
+    m = re.search(r"/groups/([a-zA-Z0-9._-]+)", final_url)
+    if not m:
+        return False
+    seg = m.group(1).lower()
+    reserved = {
+        "feed", "joins", "discover", "create", "categories", "notifications",
+        "search", "chats", "membership_questions", "member-requests", "settings",
+        "edit", "about", "events", "media", "files", "buy_sell_discussion",
+        "your_posts", "manage", "permalink", "user", "profile", "browse",
+        "my_groups", "explore",
+    }
+    if seg in reserved:
+        return False
+    # If the landed segment is a plain numeric id, we want it to match the
+    # target group id (slug segments can't be compared directly).
+    if seg.isdigit():
+        return seg == str(target_id).strip()
+    # Non-numeric slug: assume it's a real group (best effort).
+    return True
 
 
 class Worker:
@@ -58,6 +105,8 @@ class Worker:
         self.last_result = None
         self._final_summary = ""
         self._posted_this_run = 0
+        self._pending_caption = ""  # browser-held caption for the current run
+        self.blast_posted = []  # groups actually posted in the current batch cycle
 
     # ---- public API ----
     def is_busy(self):
@@ -76,6 +125,26 @@ class Worker:
 
     def start_check(self, profile_name):
         return self._begin("check", profile_name, "", "search", 0, "")
+
+    def start_sync(self, profile_name):
+        """Sync the FULL list of groups the account is a member of from the
+        live Facebook Groups feed (Option A auto-scroll scrape)."""
+        return self._begin("sync", profile_name, "", "search", 0, "")
+
+    def start_blast(self, profile_name, batch_size=10, caption=""):
+        """Sync my groups, then post the ready-made content to one batch of
+        groups (batch_size per press). Durable resume continues next press."""
+        try:
+            self.db.set_state("blast_batch", str(max(1, int(batch_size) or 10)))
+        except Exception:
+            pass
+        return self._begin("blast", profile_name, "", "search", 0, caption)
+
+    def start_page_post(self, profile_name, page_url, caption="", file_name=""):
+        """Post a media file to an owned Facebook Page."""
+        self._page_url_override = page_url
+        self._page_file_override = str(file_name or "").strip()
+        return self._begin("page_post", profile_name, "", "search", 0, caption)
 
     def stop(self):
         self._stop.set()
@@ -171,6 +240,7 @@ class Worker:
     def _run_job(self, profile_name, keyword, filter_mode, min_members, caption):
         error = None
         started_at = datetime.now().isoformat(timespec="seconds")
+        self._pending_caption = str(caption or "").strip()
         try:
             self._set_stage("launch", f"Preparing Chrome ({profile_name})",
                             "Launching Chrome...")
@@ -207,6 +277,21 @@ class Worker:
             if self.job == "check":
                 self._check_join_status()
                 self._emit("Join-status check complete.")
+                return
+
+            if self.job == "sync":
+                self._sync_my_groups()
+                self._emit("Group sync complete.")
+                return
+
+            if self.job == "blast":
+                self._blast_groups()
+                self._emit("Batch posting complete.")
+                return
+
+            if self.job == "page_post":
+                self._page_post(self._page_url_override)
+                self._emit("Page posting complete.")
                 return
 
             if self.job == "scan":
@@ -269,6 +354,8 @@ class Worker:
                     "scan": "Scan finished",
                     "run": "Posting run ended",
                     "check": "Join-status check finished",
+                    "sync": "Group sync finished",
+                    "blast": "Batch posting finished",
                 }.get(self.job, "Job finished"),
                 "summary": summary,
                 "finished_at": datetime.now().isoformat(timespec="seconds"),
@@ -324,6 +411,12 @@ class Worker:
             self._set_stage("check", f"[{i}/{len(to_check)}] {name}",
                             f"Checking safety: {name} ({i}/{len(to_check)})")
             status, signal = check_group(self.browser.page, c["id"], self._emit)
+            try:
+                info = extract_group_info_from_page(self.browser.page)
+                if info.get("name") or info.get("member_count"):
+                    self.db.upsert_group(c["id"], name=info.get("name"), member_count=info.get("member_count"))
+            except Exception:
+                pass
             self.db.set_group_status(c["id"], status, signal)
             self._emit(
                 f"[check {i}/{len(to_check)}] {c.get('name') or c['id']} "
@@ -394,10 +487,15 @@ class Worker:
         # staying under ~10 group joins/day on an established account (~5 on a
         # new one) never triggers a restriction; going past ~20-30 in a day is
         # a clear bot signal that causes a "joining too fast" block (24-48h).
-        # We therefore hard-stop at 10 regardless of any user setting.
-        HARD_JOIN_CAP = 10
-
+        # We therefore hard-stop at 10 regardless of any user setting —
+        # unless Developer mode is enabled, which lifts ALL caps.
         settings = self.config.settings
+        if bool(settings.get("developer_mode", False)):
+            HARD_JOIN_CAP = 1_000_000
+            self._emit("Developer mode ON: daily join cap disabled.")
+        else:
+            HARD_JOIN_CAP = 10
+
         jd_min = max(15, int(settings.get("join_delay_min", 30)))
         jd_max = max(jd_min, int(settings.get("join_delay_max", 90)))
 
@@ -673,6 +771,11 @@ class Worker:
                 join_status, detail = check_membership_status(
                     self.browser.page, g["id"], self._emit
                 )
+                info = extract_group_info_from_page(self.browser.page)
+                if info.get("name") or info.get("member_count"):
+                    self.db.upsert_group(g["id"], name=info.get("name"), member_count=info.get("member_count"))
+                    if info.get("name"):
+                        name = info.get("name")
             except Exception as e:
                 join_status, detail = "unknown", str(e)
 
@@ -709,12 +812,285 @@ class Worker:
                 f"{joined_n} joined, {pending_n} pending, {declined_n} declined"
             )
 
+    # ---- sync my groups (Option A) ----
+    def _sync_my_groups(self):
+        """Scrape the FULL list of groups this account belongs to from the live
+        Facebook Groups feed and store them as confirmed memberships.
+
+        Only a member (already on the feed) can appear here, so every synced
+        group is a real membership regardless of how it was joined. We store
+        them in the DB and mark join_status = 'joined' so the batch poster and
+        the rest of the UI treat them as posting targets.
+        """
+        self._set_stage("sync", "Reading your Groups feed",
+                        "Syncing your full Facebook groups list...")
+        dev = bool(self.config.settings.get("developer_mode", False))
+        self._emit("Syncing your full Facebook groups list from your Groups feed...")
+        if dev:
+            self._emit("Developer mode ON: scrolling the whole feed with no "
+                       "early-stop so every group is captured.")
+        try:
+            mine = list_my_groups(
+                self.browser.page, self._emit,
+                max_scrolls=500 if dev else 100,
+                no_early_stop=dev,
+                should_stop=lambda: self._stop.is_set(),
+                should_pause=self._pause.is_set,
+            )
+        except Exception as e:
+            self._final_summary = f"Sync failed: {e}"
+            self._emit(f"Sync failed: {e}")
+            return
+        for g in mine:
+            member_count = g.get("member_count") or 0
+            if not member_count:
+                # The feed often omits member counts — reuse the count we already
+                # have in the DB for known groups instead of overwriting it.
+                existing = self.db.get_group(g["id"])
+                if existing and existing["member_count"]:
+                    member_count = existing["member_count"]
+                g["member_count"] = member_count
+            self.db.upsert_group(
+                g["id"], g["name"], member_count or None, g["url"]
+            )
+            # The feed only lists groups we already belong to -> confirmed member.
+            self.db.set_join_status(g["id"], JOIN_JOINED)
+
+        # Enrich missing member counts for any remaining 0-member groups
+        zero_groups = [g for g in mine if not g.get("member_count")]
+        if zero_groups:
+            self._emit(f"Enriching member counts for {len(zero_groups)} group(s)...")
+            for idx, g in enumerate(zero_groups, 1):
+                if self._stop.is_set():
+                    break
+                name_disp = g.get("name") or g["id"]
+                self._set_stage("sync", f"[{idx}/{len(zero_groups)}] {name_disp}",
+                                f"Checking member count: {name_disp} ({idx}/{len(zero_groups)})")
+                try:
+                    url = g.get("url") or f"https://www.facebook.com/groups/{g['id']}/"
+                    self.browser.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    # Give the React shell time to render the group header before
+                    # extracting; 600ms was too short on busy/cold pages and the
+                    # "N members" text sometimes had not painted yet.
+                    self.browser.page.wait_for_timeout(2500)
+                    final_url = self.browser.page.url or ""
+                    info = extract_group_info_from_page(self.browser.page)
+                    new_mc = info.get("member_count") or 0
+                    new_name = info.get("name") or ""
+
+                    # Sanity: only accept the result if we actually landed on a
+                    # single group page. Facebook sometimes bounces us to the
+                    # /groups/ feed or the joins list (title like "All groups
+                    # you've joined (N)"), where the extracted name/count is
+                    # garbage for THIS group. In that case keep the stored row.
+                    landed_on_group = _looks_like_group_page(final_url, str(g["id"]))
+                    if not landed_on_group or _is_generic_title(new_name):
+                        if new_mc:
+                            g["member_count"] = new_mc if landed_on_group else 0
+                        self._emit(f"[details {idx}/{len(zero_groups)}] {g['name']} -> "
+                                   f"skipped (landed on list page '{new_name[:40]}' / {final_url[:60]})")
+                        continue
+
+                    if new_mc:
+                        g["member_count"] = new_mc
+                    if new_name and (not g.get("name") or g.get("name") == g.get("id")):
+                        g["name"] = new_name
+                    self.db.upsert_group(g["id"], name=(
+                        new_name or g.get("name")), member_count=new_mc or None)
+                    mc_str = f"{new_mc:,} members" if new_mc else "not found"
+                    self._emit(f"[details {idx}/{len(zero_groups)}] {g['name']} -> {mc_str}")
+                except Exception as ex:
+                    self._emit(f"[details {idx}/{len(zero_groups)}] {g.get('name') or g['id']} -> could not load ({ex})")
+                # Brief pause between live page visits to avoid triggering
+                # Facebook's rate limiter (which shows the login wall).
+                if not self._stop.is_set():
+                    self._page_wait(1200)
+
+        # Persist a readable result so the UI can show "Found N groups" and the
+        # full list without needing to scroll the raw feed again.
+        self.db.set_state("sync_result", json.dumps({
+            "found": len(mine),
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "groups": [{"id": g["id"], "name": g["name"], "member_count": g.get("member_count")}
+                       for g in mine],
+        }))
+        self._final_summary = f"{len(mine)} group(s) synced from your Facebook account."
+        self._emit(f"Synced {len(mine)} group(s) — all are treated as confirmed memberships.")
+        self._emit("Refresh the Groups / My Groups view to see the full list.")
+        if self.notify:
+            self.notify("Groups synced", f"{len(mine)} of your groups found")
+
+    # ---- batch post to all my groups ----
+    def _blast_groups(self):
+        """Post the ready-made content to one batch (batch_size) of the account's
+        groups, one post per group per press, then stop. Durable resume continues
+        on the next press (like auto-join resume)."""
+        settings = self.config.settings
+        delay_min = max(30, int(settings.get("delay_min", 180)))
+        delay_max = max(delay_min, int(settings.get("delay_max", 480)))
+        media_folder = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            settings.get("media_folder", "content"),
+        ))
+        try:
+            batch = max(1, int(self.db.get_state("blast_batch", "10") or 10))
+        except Exception:
+            batch = 10
+
+        # 1. Target pool = every confirmed membership from the last sync (no
+        #    forced re-sync here — that would scrape every group and be very
+        #    slow). Run "Scan My Groups"/sync separately to refresh the list.
+        done = set()
+        try:
+            raw = self.db.get_state("blast_done", "") or ""
+            done = set(json.loads(raw)) if raw else set()
+        except Exception:
+            done = set()
+        targets_all = self.db.get_groups_by_join_status(JOIN_JOINED)
+        targets = [g for g in targets_all if str(g["id"]) not in done]
+        if targets_all and not targets:
+            self._emit(
+                f"All {len(done)} of your groups already posted this cycle — "
+                "starting a fresh pass."
+            )
+            done = set()
+            targets = list(targets_all)
+            self.blast_posted = []
+            try:
+                self.db.set_state("blast_result", json.dumps([]))
+            except Exception:
+                pass
+
+        batch_targets = targets[:batch]
+        if not batch_targets:
+            self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
+            self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
+            return
+
+        self.db.set_state("blast_progress", json.dumps({
+            "done": len(done), "total": len(targets_all),
+        }))
+        self._set_stage("prepare",
+                        f"{len(batch_targets)} group(s) in this batch "
+                        f"({len(done)}/{len(targets_all)} done this cycle)",
+                        f"Posting to {len(batch_targets)} group(s) this press...")
+
+        posted_n = failed_n = 0
+        for i, g in enumerate(batch_targets, 1):
+            if self._stop.is_set():
+                break
+            while self._pause.is_set() and not self._stop.is_set():
+                time.sleep(0.3)
+            if self._stop.is_set():
+                break
+
+            file_path = self._pick_media(media_folder)
+            if not file_path:
+                self._emit("No media files found in the content folder.")
+                self._final_summary = "No media files found in the content folder."
+                break
+
+            self._set_stage("work", f"[{i}/{len(batch_targets)}] {g.get('name') or g['id']}",
+                            f"Posting to {g.get('name') or g['id']} ({i}/{len(batch_targets)})")
+            status = self._post_one(g, file_path, self._pending_caption)
+            # Only 'posted' and 'pending' (routed to admin approval) count as
+            # covered this cycle. A failure stays in the pool so the next press
+            # retries it instead of silently skipping a group.
+            if status == "posted":
+                posted_n += 1
+                done.add(str(g["id"]))
+            elif status == "pending":
+                done.add(str(g["id"]))
+            else:
+                failed_n += 1
+            if status in ("posted", "pending"):
+                self.blast_posted.append({
+                    "id": str(g["id"]),
+                    "name": g.get("name") or g["id"],
+                    "member_count": g.get("member_count") or 0,
+                    "posted_at": datetime.now().isoformat(timespec="seconds"),
+                })
+                try:
+                    self.db.set_state("blast_result", json.dumps(self.blast_posted))
+                except Exception:
+                    pass
+            try:
+                self.db.set_state("blast_done", json.dumps(sorted(done)))
+            except Exception:
+                pass
+            self.db.set_state("blast_progress", json.dumps({
+                "done": len(done), "total": len(targets_all),
+            }))
+
+            if i < len(batch_targets):
+                delay = random.randint(delay_min, delay_max)
+                self._set_stage("cooldown", f"next post in {delay}s",
+                                f"Cooling down {delay // 60}m{delay % 60}s before the next post...")
+                self._emit(
+                    f"Waiting {delay // 60}m{delay % 60}s before the next post "
+                    f"(to stay under Facebook's radar)..."
+                )
+                self._wait_stop(interval=1, total=delay)
+
+        self._final_summary = (
+            f"{posted_n} posted · {failed_n} failed this batch · "
+            f"{len(done)}/{len(targets_all)} groups covered this cycle"
+        )
+        self._emit(
+            f"Batch finished: {posted_n} post(s) this press, "
+            f"{len(done)}/{len(targets_all)} of your groups posted this cycle. "
+            f"{failed_n} failed and will be retried next press. "
+            "Press Post Batch again to continue."
+        )
+        if self.notify:
+            self.notify("Batch posting done",
+                        f"{posted_n} posted · {failed_n} failed · "
+                        f"{len(done)}/{len(targets_all)} groups this cycle")
+
+    # ---- page post ----
+    def _page_post(self, page_url):
+        """Post a media file to an owned Facebook Page."""
+        settings = self.config.settings
+        media_folder = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            settings.get("media_folder", "content"),
+        ))
+        file_path = None
+        want = getattr(self, "_page_file_override", "") or ""
+        if want:
+            cand = os.path.join(media_folder, want)
+            if os.path.isfile(cand):
+                file_path = cand
+        if not file_path:
+            file_path = self._pick_media(media_folder)
+        if not file_path:
+            self._final_summary = "No media files found in the content folder."
+            self._emit("No media files found in the content folder.")
+            return
+
+        self._set_stage("work", f"Posting {os.path.basename(file_path)} to page",
+                        "Posting to your Page...")
+        self._emit(f"Posting {os.path.basename(file_path)} to the Page...")
+        try:
+            status, msg = post_media_to_page(
+                self.browser.page, file_path, page_url,
+                caption=self._pending_caption, log=self._emit,
+            )
+        except Exception as e:
+            status, msg = "failed", str(e)
+
+        self._emit(f"Page post result: {status} — {msg}")
+        self._final_summary = f"Page post: {status} — {msg}"
+        if self.notify:
+            self.notify("Page post", f"{status}: {msg}")
+
     # ---- posting loop ----
     def _posting_loop(self, caption):
         settings = self.config.settings
         delay_min = max(30, int(settings.get("delay_min", 180)))
         delay_max = max(delay_min, int(settings.get("delay_max", 480)))
-        soft_cap = int(settings.get("soft_cap", 150))
+        dev = bool(settings.get("developer_mode", False))
+        soft_cap = 0 if dev else int(settings.get("soft_cap", 150))
         max_cycle = int(settings.get("max_cycle_posts", 0))
         media_folder = settings.get("media_folder", "content")
         media_folder = os.path.abspath(os.path.join(
@@ -784,9 +1160,16 @@ class Worker:
                         f"Publishing to {g['name']}...")
         try:
             status, message = post_media(
-                self.browser.page, g["id"], file_path, caption or self.config.settings.get("caption", ""),
+                self.browser.page, g["id"], file_path,
+                self._pending_caption if not caption else caption,
                 self._emit,
             )
+            try:
+                info = extract_group_info_from_page(self.browser.page)
+                if info.get("name") or info.get("member_count"):
+                    self.db.upsert_group(g["id"], name=info.get("name"), member_count=info.get("member_count"))
+            except Exception:
+                pass
         except Exception as e:
             status, message = "failed", str(e)
         self.db.add_post(g["id"], g["name"], file_path, status, message)
@@ -799,6 +1182,7 @@ class Worker:
             self._emit(f"[PENDING] {g['name']} now flagged as require-approval.")
         else:
             self._emit(f"[FAILED] {g['name']}: {message}")
+        return status
 
     def _pick_media(self, folder):
         files = []

@@ -36,6 +36,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <span class="tab-label">Dashboard</span>
       </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="blast" id="tabBlast">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+        <span class="tab-label">Post</span>
+      </button>
       <button class="tab-btn" role="tab" aria-selected="false" data-tab="groups" id="tabGroups">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6"/><path d="M19 8v6"/></svg>
         <span class="tab-label">Groups</span>
@@ -135,32 +139,6 @@
             <div class="account-detail" id="acctDetail"></div>
           </section>
 
-          <!-- ============ RUN CARD ============ -->
-          <section class="card run-card">
-            <div class="card-head">
-              <h2>Run</h2>
-              <span class="card-sub" id="runSub">Posting engine</span>
-            </div>
-            <div class="run-buttons">
-              <button id="btnStart" class="btn success grow">
-                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                Start Posting
-              </button>
-              <button id="btnPause" class="btn outline" disabled title="Pause between iterations">
-                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-                Pause
-              </button>
-              <button id="btnStop" class="btn danger" disabled>
-                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
-                Stop
-              </button>
-            </div>
-            <div class="run-status" id="runStatus">Idle</div>
-            <div class="recent" id="recentList">
-              <div class="recent-empty">No posts yet this session.</div>
-            </div>
-          </section>
-
           <!-- ============ STATS ROW ============ -->
           <section class="stats">
             <div class="stat">
@@ -180,8 +158,8 @@
               <span class="stat-label">Approval / skip</span>
             </div>
             <div class="stat">
-              <span class="stat-value blue" id="statReview">0</span>
-              <span class="stat-label">In review</span>
+              <span class="stat-value blue" id="statJoined">0</span>
+              <span class="stat-label">My groups</span>
             </div>
             <div class="stat">
               <span class="stat-value" id="statMedia">0</span>
@@ -236,13 +214,191 @@
                   </div>
                 </div>
                 <div class="field">
-                  <label for="captionInput">Caption</label>
+                  <label for="captionInput">Default caption</label>
                   <input id="captionInput" type="text" placeholder="Optional caption added to every post" spellcheck="true">
+                  <p class="hint">This mirrors the post text you write in <strong>Compose your post</strong> above — one source of truth.</p>
                 </div>
               </section>
 
             </div>
           </details>
+
+        </section>
+
+        <!-- -------- POST TO ALL GROUPS TAB -------- -->
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabBlast" data-tab="blast">
+
+          <!-- ============ SCRAPE MY GROUPS ============ -->
+          <section class="card">
+            <div class="card-head">
+              <h2>My Groups on Facebook</h2>
+              <span class="card-sub">Scrape the full list of groups this account belongs to — you'll see exactly how many were found</span>
+              <div class="head-spacer"></div>
+              <button id="btnRefreshSync" class="btn ghost small" title="Reload the scrape results">Refresh</button>
+            </div>
+            <div class="sync-summary" id="syncSummary">
+              <div class="recent-empty">No scrape yet. Press <strong>Scrape My Groups</strong> to find every group on your Facebook account.</div>
+            </div>
+            <div class="blast-controls">
+              <button id="btnSyncMyGroups" class="btn primary grow" title="Scrape the full list of groups on this Facebook account (auto-scroll) and store them as your memberships">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                <span class="lbl">Scrape My Groups</span>
+              </button>
+              <span class="chip" id="syncDevChip" hidden>Developer mode</span>
+            </div>
+            <p class="hint" id="syncDevHint">Only found a handful of groups? Turn on <strong>Developer mode</strong> in Settings — it disables the scroll/limit caps so the entire feed is scraped (all 100+ groups).</p>
+            <div class="sync-list-wrap">
+              <table class="groups">
+                <thead>
+                  <tr>
+                    <th>Group</th>
+                    <th class="num">Members</th>
+                  </tr>
+                </thead>
+                <tbody id="syncGroupsBody">
+                  <tr><td colspan="2" class="empty-cell">Scrape your groups to see the full list here.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- ============ CONTENT COMPOSER ============ -->
+          <section class="card composer-card">
+            <div class="card-head composer-head">
+              <h2>Compose your post</h2>
+              <span class="card-sub" id="composerSub">Write the post text &amp; pick your media — then hit Post Batch</span>
+            </div>
+
+            <div class="composer-grid">
+
+              <!-- left: editor -->
+              <div class="composer-edit">
+                <div class="field">
+                  <label for="composerText">Post text / description</label>
+                  <textarea id="composerText" rows="5" maxlength="4000"
+                            placeholder="What's on your mind? Say something about this post..."></textarea>
+                  <p class="hint" id="composerCharHint">0 / 4000</p>
+                </div>
+
+                <!-- media options sit right under the post text -->
+                <div class="composer-media-controls">
+                  <span class="chip composer-count" id="composerMediaCount">0 media</span>
+                  <button id="btnRefreshMedia" class="btn ghost small" title="Re-scan the media folder for new files">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                    Refresh
+                  </button>
+                  <button id="btnChangeFolder" class="btn outline small" title="Choose which folder holds your images &amp; videos">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                    Change folder
+                  </button>
+                </div>
+
+                <div class="composer-media-head">
+                  <span class="field-label">Media</span>
+                  <div class="seg" id="composerModeSeg">
+                    <input type="radio" name="composerMode" id="composerModeSingle" value="single" checked>
+                    <label for="composerModeSingle">One file</label>
+                    <input type="radio" name="composerMode" id="composerModeMulti" value="multiple">
+                    <label for="composerModeMulti">Multiple</label>
+                  </div>
+                  <div class="head-spacer"></div>
+                  <span class="composer-sel" id="composerSelInfo"></span>
+                  <button id="btnClearMedia" class="btn ghost small" title="Clear the selected media">Clear</button>
+                </div>
+
+                <div id="composerMediaList" class="composer-media-list">
+                  <div class="recent-empty">Loading media…</div>
+                </div>
+
+                <div id="composerMediaGuide" class="inline-note hidden"></div>
+              </div>
+
+              <!-- right: live Facebook-style preview -->
+              <div class="composer-preview">
+                <div class="preview-label">Live preview</div>
+                <div id="postPreview" class="post-card">
+                  <div class="post-head">
+                    <div class="post-avatar" id="previewAvatar">A</div>
+                    <div class="post-meta">
+                      <div class="post-name" id="previewName">Your account</div>
+                      <div class="post-time">Just now</div>
+                    </div>
+                  </div>
+                  <div class="post-text" id="previewText">Your post text and media will appear here as you type.</div>
+                  <div class="post-media" id="previewMedia"></div>
+                </div>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- ============ POST TO MY GROUPS ============ -->
+          <section class="card blast-card">
+            <div class="card-head">
+              <h2>Post to My Groups</h2>
+              <span class="card-sub">Post the content you composed to the next batch of your groups</span>
+            </div>
+            <div class="blast-controls">
+              <div class="field blast-batch">
+                <label for="blastBatch">Groups per press</label>
+                <input type="number" id="blastBatch" min="1" max="100" step="1" value="10"
+                       title="How many of your groups to post to in one batch run">
+              </div>
+              <button id="btnBlast" class="btn success grow" title="Sync, then post your content to the next batch of groups (one post per group, then stop)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
+                <span class="lbl">Post Batch</span>
+              </button>
+            </div>
+            <div class="blast-hint" id="blastHint">Uses the post text &amp; media from <strong>Compose your post</strong>. Posts one batch (the number you set above), then stops. Press again to continue to the next batch.</div>
+            <div class="blast-status" id="blastProgress"></div>
+          </section>
+
+          <!-- ============ PAGE POST CARD ============ -->
+          <section class="card pagepost-card">
+            <div class="card-head">
+              <h2>Post to My Page</h2>
+              <span class="card-sub">Post the composed content to one of your Facebook Pages (e.g. myearnify)</span>
+            </div>
+            <div class="blast-controls">
+              <div class="field grow">
+                <label for="pagePostUrl">Page URL</label>
+                <input type="text" id="pagePostUrl" value="https://www.facebook.com/profile.php?id=61591511835366"
+                       placeholder="https://www.facebook.com/... page id/photourl">
+              </div>
+              <button id="btnPagePost" class="btn success grow" title="Post the composed text &amp; media to the Page">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
+                <span class="lbl">Post to Page</span>
+              </button>
+            </div>
+            <div class="blast-hint" id="pagePostHint">Uses the post text &amp; media from <strong>Compose your post</strong>. The app switches into your Page, attaches the file, adds the caption, and posts it.</div>
+            <div class="blast-status" id="pagePostProgress"></div>
+          </section>
+
+          <!-- ============ RUN CARD ============ -->
+          <section class="card run-card">
+            <div class="card-head">
+              <h2>Run</h2>
+              <span class="card-sub" id="runSub">Posting engine</span>
+            </div>
+            <div class="run-buttons">
+              <button id="btnStart" class="btn success grow">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                Start Posting
+              </button>
+              <button id="btnPause" class="btn outline" disabled title="Pause between iterations">
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                Pause
+              </button>
+              <button id="btnStop" class="btn danger" disabled>
+                <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                Stop
+              </button>
+            </div>
+            <div class="run-status" id="runStatus">Idle</div>
+            <div class="recent" id="recentList">
+              <div class="recent-empty">No posts yet this session.</div>
+            </div>
+          </section>
 
         </section>
 
@@ -458,13 +614,18 @@
         <span>Re-check unclassified groups on start</span>
         <span class="switch"><input type="checkbox" id="setScanOnStart"><i></i></span>
       </label>
+      <label class="switch-row dev-toggle">
+        <span><strong>Developer mode</strong><br><small>Lifts every cap: no daily post cap, no 10/day join limit, and group scraping scrolls the whole feed with no early-stop so all 100+ groups are captured.</small></span>
+        <span class="switch"><input type="checkbox" id="setDevMode"><i></i></span>
+      </label>
+      <p class="hint">Developer mode removes the built-in safety rails. Read the warnings below before enabling — Facebook can flag accounts that join too many groups or post too aggressively.</p>
       <p class="hint">Delays are the random wait between posts. The soft cap pauses posting for the rest of the day once reached.</p>
       <div class="settings-sub">Join Safety</div>
       <div class="field-row">
         <div class="field"><label for="setJoinDelayMin">Join delay min (sec)</label><input id="setJoinDelayMin" type="number" min="15" step="5"></div>
         <div class="field"><label for="setJoinDelayMax">Join delay max (sec)</label><input id="setJoinDelayMax" type="number" min="15" step="5"></div>
       </div>
-      <p class="hint"><strong>HARD STOP (not configurable):</strong> the app will never join more than <strong>10 groups per day</strong>, no matter what. This is a permanent safety cap that protects your account from a Facebook "joining too fast" restriction. When it's reached, the app stops, saves progress, and tells you to run Auto-Join again the next day to continue. That is the only way to resume.</p>
+      <p class="hint"><strong>HARD STOP (default):</strong> the app will never join more than <strong>10 groups per day</strong>. This permanent safety cap protects your account from a Facebook "joining too fast" restriction. When it's reached, the app stops, saves progress, and tells you to run Auto-Join again the next day to continue. <strong>Developer mode disables this cap.</strong></p>
       <p class="hint">Join delays are the random pause between each group join (30–90s recommended). Longer, randomized pauses look more human and are safer.</p>
     </div>
     <div class="modal-foot">
@@ -585,9 +746,13 @@
       <button class="icon-btn" data-close="modalBrowse">✕</button>
     </div>
     <div class="modal-body">
+      <div class="browse-query">
+        <input id="browseQuery" type="text" placeholder="Paste a full path, e.g. C:\Users\JOHN LESHAN\Documents\BOOKS, then press Open or Enter" spellcheck="false" autocomplete="off">
+        <button class="btn ghost small" id="btnBrowseGo">Open</button>
+      </div>
       <div class="browse-path" id="browsePath">/</div>
       <div id="browseDirs" class="browse-dirs"></div>
-      <p class="hint" id="browseHint">Click a folder to open it, then choose it below.</p>
+      <p class="hint" id="browseHint">Type or paste any folder path above to jump straight to it — you can navigate to any drive or folder, or click a sub-folder below.</p>
     </div>
     <div class="modal-foot">
       <button class="btn ghost" id="btnBrowseUp">Up one level</button>

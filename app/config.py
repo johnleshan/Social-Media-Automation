@@ -24,6 +24,7 @@ DEFAULTS = {
         "scan_on_start": True,
         "min_members": 0,
         "max_cycle_posts": 0,
+        "developer_mode": False,
     },
     "last_profile": "",
     "last_keyword": "",

@@ -18,6 +18,13 @@ const state = {
   prevBusy: false,
   unseenLogCount: 0,
   toastFiredFor: null,
+  media: [],           // list of {name,path,is_video} from /api/media
+  mediaLoaded: false,
+  mediaMode: "single", // "single" | "multiple"
+  selectedMedia: [],   // array of {path,name,is_video}
+  composerSynced: false,
+  lastMediaCount: -1,
+  previewSig: "",
 };
 
 /* ---------------- helpers ---------------- */
@@ -67,6 +74,249 @@ function toast(text, level = "info") {
 }
 function openModal(id) { $('#' + id).removeAttribute("hidden"); }
 function closeModal(id) { $('#' + id).setAttribute("hidden", ""); }
+
+/* ============================================================
+   CONTENT COMPOSER
+   Single source of truth for the post caption + media staging.
+   Content is held in the BROWSER (localStorage) only — never stored by the
+   backend. The caption is passed to the posting engine at post-time via the
+   request body, used for that run, then forgotten.
+   Media selection is a preview/staging aid — the bot publishes the
+   files present in the media folder.
+   ============================================================ */
+const COMPOSER_LS = "sm_composer";
+function composerStorage() {
+  try {
+    return JSON.parse(localStorage.getItem(COMPOSER_LS)) || {};
+  } catch { return {}; }
+}
+function composerSave() {
+  try {
+    localStorage.setItem(COMPOSER_LS, JSON.stringify({
+      text: $("#composerText").value,
+      mode: state.mediaMode,
+      selected: state.selectedMedia.map((m) => ({"path": m.path, "name": m.name, "is_video": m.is_video})),
+    }));
+  } catch {}
+}
+
+function getCaption() {
+  // single source of truth = the composer textarea
+  return ($("#composerText")?.value || "").trim();
+}
+function setCaption(text) {
+  const t = String(text ?? "");
+  $("#composerText").value = t;
+  // keep the advanced-settings caption in sync (same value)
+  if ($("#captionInput").value !== t) $("#captionInput").value = t;
+  updateCaptionHint();
+  renderPostPreview();
+}
+
+async function persistCaption(text) {
+  // Content is held in the browser only (localStorage). We never persist the
+  // composed post body to the backend or its config — it is forgotten after
+  // posting. The caption is passed to the posting engine at post-time only.
+  composerSave();
+}
+
+function updateCaptionHint() {
+  const el = $("#composerCharHint");
+  if (el) el.textContent = `${$("#composerText").value.length} / 4000`;
+}
+
+function mediaEl(m) {
+  const node = document.createElement("div");
+  if (m.is_video) {
+    // Live preview: an actual playable video (muted autoplay frame + play
+    // overlay). Click to play — this mirrors how Facebook shows a video post
+    // (a playable video with a play control), not a static image.
+    node.className = "pm-video";
+    const v = document.createElement("video");
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    v.controls = true;
+    v.src = "/api/media_file?path=" + encodeURIComponent(m.path);
+    node.appendChild(v);
+  } else {
+    const img = document.createElement("img");
+    img.className = "pm-img";
+    img.src = "/api/media_file?path=" + encodeURIComponent(m.path);
+    img.alt = m.name;
+    node.appendChild(img);
+  }
+  return node;
+}
+
+function videoPlayOverlay() {
+  const ov = document.createElement("div");
+  ov.className = "pm-play";
+  ov.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+  return ov;
+}
+
+function renderPostPreview() {
+  const textEl = $("#previewText");
+  const mediaEl2 = $("#previewMedia");
+  if (!textEl || !mediaEl2) return;
+  const text = $("#composerText").value;
+  const name = state.current?.selected?.name || "Your account";
+  const sig = text.length + "|" + text + "|" + name + "|" +
+    state.selectedMedia.map((m) => m.path).join(",");
+  if (state.previewSig === sig) return;
+  state.previewSig = sig;
+
+  if (text.trim()) {
+    textEl.textContent = text;
+    textEl.classList.remove("muted");
+  } else {
+    textEl.classList.add("muted");
+    textEl.textContent = "Your post text and media will appear here as you type.";
+  }
+  // avatar / name from selected account
+  if ($("#previewAvatar")) {
+    $("#previewAvatar").textContent = (name === "Your account" ? "A" : name.charAt(0)).toUpperCase();
+  }
+  $("#previewName").textContent = name;
+
+  mediaEl2.innerHTML = "";
+  if (state.selectedMedia.length) {
+    state.selectedMedia.forEach((m) => mediaEl2.appendChild(mediaEl(m)));
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "pm-empty";
+    empty.textContent = "No media selected — pick a file from the list to preview it.";
+    mediaEl2.appendChild(empty);
+  }
+}
+
+function renderComposerMediaList() {
+  const list = $("#composerMediaList");
+  const count = $("#composerMediaCount");
+  const guide = $("#composerMediaGuide");
+  if (!list) return;
+
+  if (!state.mediaLoaded) {
+    list.innerHTML = '<div class="composer-empty">Loading media…</div>';
+    return;
+  }
+  if (state.media.length === 0) {
+    list.innerHTML = '<div class="composer-empty">No media files found. Drop images or videos into your content folder, then press Refresh.</div>';
+    if (count) count.textContent = "0 media";
+    if (guide) {
+      guide.className = "inline-note warn";
+      guide.textContent = "Your media folder appears to be empty. Add JPG/PNG/GIF/MP4… files to the folder, then press Refresh. You can change the folder with the “Change folder” button.";
+    }
+    return;
+  }
+  if (count) count.textContent = state.media.length + (state.media.length === 1 ? " media" : " media files");
+  if (guide) guide.classList.add("hidden");
+
+  const selPaths = new Set(state.selectedMedia.map((m) => m.path));
+  const frag = document.createDocumentFragment();
+  state.media.forEach((m) => {
+    const tile = document.createElement("div");
+    tile.className = "media-tile" + (selPaths.has(m.path) ? " selected" : "");
+    tile.dataset.path = m.path;
+    tile.title = m.name;
+    if (m.is_video) {
+      const v = document.createElement("video");
+      v.className = "tile-img";
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = "metadata";
+      v.src = "/api/media_file?path=" + encodeURIComponent(m.path);
+      tile.appendChild(v);
+      tile.appendChild(videoPlayOverlay());
+      const chk = document.createElement("span");
+      chk.className = "tile-check";
+      chk.textContent = "✓";
+      tile.appendChild(chk);
+    } else {
+      const img = document.createElement("img");
+      img.className = "tile-img";
+      img.src = "/api/media_file?path=" + encodeURIComponent(m.path);
+      img.alt = m.name;
+      img.loading = "lazy";
+      tile.appendChild(img);
+      const chk = document.createElement("span");
+      chk.className = "tile-check";
+      chk.textContent = "✓";
+      tile.appendChild(chk);
+    }
+    tile.addEventListener("click", () => toggleMediaSelect(m));
+    frag.appendChild(tile);
+  });
+  list.innerHTML = "";
+  list.appendChild(frag);
+
+  const info = $("#composerSelInfo");
+  if (info) {
+    info.textContent = state.selectedMedia.length
+      ? `${state.selectedMedia.length} selected`
+      : "";
+  }
+}
+
+function toggleMediaSelect(m) {
+  const i = state.selectedMedia.findIndex((x) => x.path === m.path);
+  if (i >= 0) {
+    state.selectedMedia.splice(i, 1);
+  } else {
+    if (state.mediaMode === "single") state.selectedMedia = [];
+    state.selectedMedia.push({ path: m.path, name: m.name, is_video: m.is_video });
+  }
+  composerSave();
+  renderComposerMediaList();
+  renderPostPreview();
+}
+
+async function loadMedia(force) {
+  // if not forced and we don't have a folder configured yet, wait
+  try {
+    const r = await api("/api/media");
+    state.mediaLoaded = true;
+    state.media = r.files || [];
+    // drop any selected media no longer present
+    const avail = new Set(state.media.map((m) => m.path));
+    state.selectedMedia = state.selectedMedia.filter((m) => avail.has(m.path));
+    composerSave();
+    renderComposerMediaList();
+    renderPostPreview();
+    if ($("#composerSub")) {
+      const folder = r.folder || "";
+      $("#composerSub").textContent = folder
+        ? `Post text & media from “${folder}” — then hit Post Batch`
+        : "Write the post text & pick your media — then hit Post Batch";
+    }
+  } catch (e) {
+    state.mediaLoaded = true;
+    state.media = [];
+    const list = $("#composerMediaList");
+    if (list) list.innerHTML = '<div class="composer-empty">Could not list media: ' + esc(e.message) + '</div>';
+  }
+}
+
+function clearComposerMedia() {
+  state.selectedMedia = [];
+  composerSave();
+  renderComposerMediaList();
+  renderPostPreview();
+}
+
+/* sync backend caption into the composer once (after first state load) */
+function syncCaptionFromState() {
+  if (state.composerSynced || !state.current?.settings) return;
+  // Only initialize the composer textarea from the backend once, then let the
+  // user (and localStorage) take over. If the user already has a saved draft,
+  // prefer it.
+  const saved = composerStorage().text;
+  const backend = state.current.settings.caption || "";
+  const draft = (saved !== undefined && saved !== null) ? saved : backend;
+  setCaption(draft);
+  state.composerSynced = true;
+}
 
 /* ---------------- teleport: switch to a tab after starting an action ---------------- */
 function teleport(tabName) {
@@ -136,7 +386,7 @@ function render() {
   $("#statTotalPosted").textContent = (st.post_stats?.posted || 0) + (st.post_stats?.pending || 0) + (st.post_stats?.failed || 0);
   $("#statSafe").textContent = st.group_counts.safe;
   $("#statSkip").textContent = st.group_counts.skip;
-  $("#statReview").textContent = st.group_counts.unknown;
+  $("#statJoined").textContent = st.group_counts.joined;
   $("#statMedia").textContent = st.media_count;
   $("#badgeSafe").textContent = st.group_counts.safe;
   $("#badgeSkip").textContent = st.group_counts.skip;
@@ -169,6 +419,9 @@ function render() {
   $("#btnScan").disabled = opRunning || noProfile;
   $("#btnJoinAll").disabled = opRunning || noProfile;
   $("#btnCheckJoin").disabled = opRunning || noProfile;
+  $("#btnSyncMyGroups").disabled = opRunning || noProfile;
+  $("#btnBlast").disabled = opRunning || noProfile;
+  $("#btnPagePost").disabled = opRunning || noProfile;
   $("#btnStop").disabled = !busy;
   const btnPause = $("#btnPause");
   btnPause.disabled = !busy;
@@ -205,6 +458,39 @@ function render() {
   } else {
     run.className = "run-status";
     run.textContent = "Idle — ready when you are.";
+  }
+
+  // Post-to-my-groups cycle progress
+  const blastEl = document.getElementById("blastProgress");
+  if (blastEl) {
+    const bp = st.blast_progress;
+    const bd = st.blast_done || [];
+    const joinedCount = (st.group_counts && st.group_counts.joined) || 0;
+    const covered = (bp && typeof bp.done === "number") ? bp.done : bd.length;
+    const total = (bp && typeof bp.total === "number") ? bp.total : joinedCount;
+    blastEl.classList.remove("done");
+    if (st.job === "blast") {
+      blastEl.textContent = `Posting this batch… ${covered} of ${total} of your groups covered this cycle.`;
+    } else if (covered > 0) {
+      blastEl.textContent = `This cycle: ${covered} of ${total} of your groups posted. Press Post Batch to continue to the next batch.`;
+      blastEl.classList.add("done");
+    } else {
+      blastEl.textContent = "Cycle not started. Sync My Groups once, then press Post Batch.";
+    }
+  }
+
+  // Post-to-my-page progress
+  const ppEl = document.getElementById("pagePostProgress");
+  if (ppEl) {
+    ppEl.classList.remove("done");
+    if (st.job === "page_post") {
+      ppEl.textContent = st.status_text || "Posting to your Page…";
+    } else if (st.stage_detail && /page/i.test(st.stage_detail || "") && st.status_text && /page/i.test(st.status_text || "")) {
+      ppEl.textContent = st.status_text;
+      ppEl.classList.add("done");
+    } else {
+      ppEl.textContent = "";
+    }
   }
 
   // activity controls bar
@@ -246,6 +532,17 @@ function render() {
 
   renderRecent();
   maybeAutoVerify(st);
+
+  // content composer — keep the live preview and account name fresh
+  syncCaptionFromState();
+  renderPostPreview();
+
+  // auto-refresh media list when the media_count changes (user drops files)
+  const mc = st.media_count;
+  if (state.lastMediaCount !== mc) {
+    state.lastMediaCount = mc;
+    loadMedia(false);
+  }
 
   // tab rendering
   renderTabs();
@@ -431,6 +728,9 @@ function renderTabs() {
 
   if (state.activeTab === "history") loadHistory();
 
+  // keep the "Post" page scrape results fresh
+  renderSync();
+
   // activity badge: reset when Activity tab is active
   const badgeAct = $("#badgeActivity");
   if (state.activeTab === "activity") {
@@ -446,6 +746,60 @@ function switchTab(tabName) {
   state.activeTab = tabName;
   localStorage.setItem("sm_tab", tabName);
   renderTabs();
+}
+
+/* ---------------- "scrape my groups" results ---------------- */
+let syncSig = "";
+function renderSync() {
+  const st = state.current;
+  const sr = st && st.sync_result;
+  const joined = (st && st.group_counts && st.group_counts.joined) || 0;
+  const total = (st && st.group_counts && st.group_counts.total) || 0;
+  const dev = !!(st && st.settings && st.settings.developer_mode);
+  const sig = (sr && sr.found) + "|" + (sr && sr.at) + "|" + total + "|" + dev;
+  const summary = $("#syncSummary");
+  const body = $("#syncGroupsBody");
+  const chip = $("#syncDevChip");
+  if (chip) chip.hidden = !dev;
+  if (!summary || !body) return;
+  if (sig === syncSig && !summary.dataset.force) return;
+  syncSig = sig;
+
+  if (!sr) {
+    summary.className = "sync-summary";
+    summary.innerHTML = `<div class="recent-empty">No scrape yet. Press <strong>Scrape My Groups</strong> to find every group on your Facebook account.</div>`;
+  } else {
+    summary.className = "sync-summary has-result";
+    summary.innerHTML =
+      `<div class="sync-found"><span class="sync-found-num">${sr.found}</span>` +
+      `<span>group(s) found in your Facebook account</span></div>` +
+      `<div class="sync-meta">Scraped ${esc(sr.at || "")} &middot; ${joined} marked as your groups &middot; ${total} groups in the database${dev ? " &middot; Developer mode: full scrape" : ""}</div>`;
+  }
+  delete summary.dataset.force;
+
+  if (!body) return;
+  body.innerHTML = "";
+  if (!sr || !sr.groups || !sr.groups.length) {
+    body.innerHTML = '<tr><td colspan="2" class="empty-cell">Scrape your groups to see the full list here.</td></tr>';
+    return;
+  }
+  // Enrich with member counts from the groups table when available.
+  const byId = {};
+  if (st && st.sync_result) {
+    sr.groups.forEach((g) => { byId[g.id] = g; });
+  }
+  sr.groups.forEach((g) => {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    nameCell.textContent = g.name || g.id;
+    const numCell = document.createElement("td");
+    numCell.className = "num";
+    numCell.textContent = "";
+    if (g.member_count != null) numCell.textContent = g.member_count;
+    row.appendChild(nameCell);
+    row.appendChild(numCell);
+    body.appendChild(row);
+  });
 }
 
 /* ---------------- journey stepper (server-side stage) ---------------- */
@@ -510,6 +864,18 @@ function renderStepper(st) {
 
   // idle: show last_result if available
   const lr = st.last_result;
+  const posted = st.blast_result || [];
+  const postedHtml = posted.length ? `
+    <div class="lr-list-head">Groups posted in this cycle (${posted.length}):</div>
+    <ul class="lr-list">
+      ${posted.map(g => `
+        <li>
+          <span class="lr-list-name">${esc(g.name || g.id)}</span>
+          ${g.member_count ? `<span class="lr-list-members">${esc(g.member_count.toLocaleString())} members</span>` : ""}
+          <span class="lr-list-time">${esc(fmtWhen(g.posted_at))}</span>
+        </li>`).join("")}
+    </ul>` : "";
+
   if (lr && lr.title) {
     container.innerHTML = "";
     empty.classList.add("hidden");
@@ -523,8 +889,23 @@ function renderStepper(st) {
         <div class="lr-time">${esc(fmtWhen(lr.finished_at))}</div>
       </div>
       <div class="lr-summary">${esc(lr.summary || "")}</div>
+      ${postedHtml}
     `;
     sub.textContent = "Last run result";
+    return;
+  }
+
+  // persisted posted-groups list survives an app restart (last_result is in-memory)
+  if (posted.length) {
+    container.innerHTML = "";
+    empty.classList.add("hidden");
+    lastRes.classList.remove("hidden");
+    lastRes.innerHTML = `<div class="lr-head">
+        <div class="lr-icon ok">✓</div>
+        <div class="lr-title">Posted to your groups</div>
+        <div class="lr-time"></div>
+      </div>${postedHtml}`;
+    sub.textContent = "Last batch posting results";
     return;
   }
 
@@ -692,9 +1073,14 @@ function fieldSnapshot() {
     keyword: $("#keywordInput").value.trim(),
     mode: $('input[name="mode"]:checked').value,
     min_members: $("#minMembers").value,
-    caption: $("#captionInput").value,
+    caption: getCaption(),
     media_folder: $("#mediaFolder").value.trim(),
   };
+}
+
+function openComposerForMedia(folder) {
+  clearComposerMedia();
+  loadMedia(true);
 }
 
 async function startRun() {
@@ -738,11 +1124,47 @@ async function checkJoinStatus() {
   } catch (e) { toast("Check failed: " + e.message, "error"); }
 }
 
+async function syncMyGroups() {
+  const profile = $("#profileSelect").value;
+  if (!profile) return toast("Add an account first.", "warn");
+  try {
+    const r = await api("/api/sync", { method: "POST", body: { profile } });
+    if (r.ok) { toast("Syncing your full Facebook groups list…", "info"); teleport("activity"); }
+    else toast(r.error || "Could not start sync.", "error");
+  } catch (e) { toast("Sync failed: " + e.message, "error"); }
+}
+
+async function blastRun() {
+  const profile = $("#profileSelect").value;
+  if (!profile) return toast("Add an account first.", "warn");
+  let batch = parseInt($("#blastBatch").value, 10);
+  if (!batch || batch < 1) batch = 10;
+  try {
+    // Send the composed caption with this batch request (browser-held, not
+    // stored on the backend). It is used for this run and then forgotten.
+    const r = await api("/api/blast", { method: "POST", body: { profile, batch, caption: getCaption() } });
+    if (r.ok) { toast(`Batch posting started (${batch} per press).`, "success"); teleport("activity"); }
+    else toast(r.error || "Could not start batch posting.", "error");
+  } catch (e) { toast("Batch failed: " + e.message, "error"); }
+}
+
 async function stopRun() {
   try {
     await api("/api/stop", { method: "POST", body: {} });
     toast("Stopping after the current post…", "warn");
   } catch (e) { toast("Stop failed: " + e.message, "error"); }
+}
+
+async function pagePostRun() {
+  const profile = $("#profileSelect").value;
+  const pageUrl = $("#pagePostUrl").value.trim();
+  if (!profile) return toast("Add an account first.", "warn");
+  if (!pageUrl) return toast("Enter the Page URL.", "warn");
+  try {
+    const r = await api("/api/page_post", { method: "POST", body: { profile, page_url: pageUrl, caption: getCaption() } });
+    if (r.ok) { toast("Page posting started.", "success"); teleport("activity"); }
+    else toast(r.error || "Could not start page posting.", "error");
+  } catch (e) { toast("Page post failed: " + e.message, "error"); }
 }
 
 async function pauseRun() {
@@ -821,6 +1243,7 @@ function openSettings() {
   $("#setMaxCycle").value = s.max_cycle_posts ?? 0;
   $("#setHeadless").checked = !!s.headless;
   $("#setScanOnStart").checked = !!s.scan_on_start;
+  $("#setDevMode").checked = !!s.developer_mode;
   $("#setJoinDelayMin").value = s.join_delay_min ?? 30;
   $("#setJoinDelayMax").value = s.join_delay_max ?? 90;
   openModal("modalSettings");
@@ -834,6 +1257,7 @@ async function saveSettings() {
     max_cycle_posts: $("#setMaxCycle").value,
     headless: $("#setHeadless").checked,
     scan_on_start: $("#setScanOnStart").checked,
+    developer_mode: $("#setDevMode").checked,
     join_delay_min: $("#setJoinDelayMin").value,
     join_delay_max: $("#setJoinDelayMax").value,
   };
@@ -919,7 +1343,9 @@ async function openImportModal() {
 /* ---------------- folder browser ---------------- */
 let browsePath = "";
 async function openBrowse() {
-  browsePath = $("#mediaFolder").value.trim() || "";
+  // Start from "This PC" (the drive list), not the C:\ root — let the user
+  // pick any drive/folder from there.
+  browsePath = "";
   openModal("modalBrowse");
   await loadBrowse();
 }
@@ -936,7 +1362,8 @@ async function loadBrowse() {
     }
     browsePath = r.path || "";
     pathEl.textContent = r.path || "My Computer (drives)";
-    $("#btnBrowseUp").disabled = !r.parent;
+    $("#browseQuery").value = r.path || "";
+    $("#btnBrowseUp").disabled = r.parent === null;
     $("#btnBrowseSelect").disabled = !r.selectable;
     dirs.innerHTML = "";
     if (!r.dirs.length) {
@@ -953,6 +1380,19 @@ async function loadBrowse() {
     pathEl.textContent = "Error: " + e.message;
   }
 }
+function browseGo() {
+  const raw = ($("#browseQuery").value || "").trim();
+  if (!raw) return;
+  // Accept both slash styles; keep any trailing slash normalized.
+  let p = raw.replace(/\//g, "\\");
+  // Strip surrounding quotes if the user pasted a quoted path.
+  p = p.replace(/^["']+|["']+$/g, "");
+  if (!p) return;
+  // If it's just a drive letter like "C" or "C:", make it a drive root.
+  if (/^[a-zA-Z]:?$/.test(p)) p = p.charAt(0).toUpperCase() + ":\\";
+  browsePath = p;
+  loadBrowse();
+}
 function browseUp() {
   const cur = browsePath;
   if (!cur) return;
@@ -965,6 +1405,10 @@ function selectBrowse() {
   if (browsePath) {
     $("#mediaFolder").value = browsePath;
     toast("Media folder set.", "success");
+    // persist the media folder to the backend, then refresh the composer media
+    api("/api/settings", { method: "POST", body: { media_folder: browsePath } })
+      .then(() => loadMedia(true))
+      .catch(() => {});
   }
   closeModal("modalBrowse");
 }
@@ -1138,6 +1582,7 @@ function bind() {
   // settings (both sidebar and old topbar button if present)
   $("#btnSettingsSidebar")?.addEventListener("click", openSettings);
   $("#btnSettings")?.addEventListener("click", openSettings);
+  $("#btnSaveSettings")?.addEventListener("click", saveSettings);
 
   $("#btnStart").addEventListener("click", startRun);
   $("#btnStop").addEventListener("click", stopRun);
@@ -1150,6 +1595,12 @@ function bind() {
   $("#btnScan").addEventListener("click", scanGroups);
   $("#btnJoinAll").addEventListener("click", joinAllGroups);
   $("#btnCheckJoin").addEventListener("click", checkJoinStatus);
+  $("#btnSyncMyGroups").addEventListener("click", syncMyGroups);
+  $("#btnRefreshSync").addEventListener("click", () => { if ($("#syncSummary")) $("#syncSummary").dataset.force = "1"; renderSync(); });
+  $("#btnBlast").addEventListener("click", blastRun);
+  $("#blastBatch").addEventListener("keydown", (e) => { if (e.key === "Enter") blastRun(); });
+  $("#btnPagePost").addEventListener("click", pagePostRun);
+  $("#pagePostUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") pagePostRun(); });
   $("#btnResume").addEventListener("click", resumeInterrupted);
   $("#btnDiscard").addEventListener("click", discardInterrupted);
 
@@ -1176,6 +1627,61 @@ function bind() {
   $("#btnBrowseFolder").addEventListener("click", openBrowse);
   $("#btnBrowseUp").addEventListener("click", browseUp);
   $("#btnBrowseSelect").addEventListener("click", selectBrowse);
+  $("#btnBrowseGo").addEventListener("click", browseGo);
+  $("#browseQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") browseGo(); });
+
+  // ---- content composer ----
+  $("#btnRefreshMedia")?.addEventListener("click", () => loadMedia(true));
+  $("#btnChangeFolder")?.addEventListener("click", openBrowse);
+  $("#btnClearMedia")?.addEventListener("click", clearComposerMedia);
+
+  $("#composerText")?.addEventListener("input", () => {
+    persistCaption(getCaption());
+    updateCaptionHint();
+    composerSave();
+    if ($("#captionInput").value !== $("#composerText").value) {
+      $("#captionInput").value = $("#composerText").value;
+    }
+    renderPostPreview();
+  });
+
+  // Advanced settings caption stays in sync with the composer (single source)
+  $("#captionInput")?.addEventListener("input", () => {
+    if ($("#composerText").value !== $("#captionInput").value) {
+      $("#composerText").value = $("#captionInput").value;
+    }
+    persistCaption(getCaption());
+    updateCaptionHint();
+    composerSave();
+    renderPostPreview();
+  });
+
+  $$('input[name="composerMode"]').forEach((r) => {
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      state.mediaMode = r.value;
+      if (state.mediaMode === "single" && state.selectedMedia.length > 1) {
+        state.selectedMedia = state.selectedMedia.slice(0, 1);
+      }
+      composerSave();
+      renderComposerMediaList();
+      renderPostPreview();
+    });
+  });
+
+  // restore the last draft + selection after binding
+  if ($("#composerText")) {
+    const saved = composerStorage();
+    if (saved.text !== undefined) $("#composerText").value = saved.text;
+    if (saved.mode === "multiple" || saved.mode === "single") state.mediaMode = saved.mode;
+    const single = $("#composerMode" + (state.mediaMode === "multiple" ? "Multi" : "Single"));
+    if (single) single.checked = true;
+    if (Array.isArray(saved.selected)) {
+      state.selectedMedia = saved.selected.filter((m) => m && m.path);
+    }
+    updateCaptionHint();
+    renderPostPreview();
+  }
 
   $("#btnRefreshGroups").addEventListener("click", () => { groupsCache = {}; loadGroups(state.groupStatus, true); });
   $("#btnRefreshHistory")?.addEventListener("click", loadHistory);
@@ -1217,4 +1723,5 @@ document.addEventListener("DOMContentLoaded", () => {
   bind();
   poll();
   loadGroups("all", true);
+  loadMedia(false);   // populate the content composer's media picker
 });

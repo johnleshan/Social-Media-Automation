@@ -1,5 +1,6 @@
 """SQLite persistence for groups, post history and rotation state."""
 import os
+import re
 import sqlite3
 from datetime import datetime
 
@@ -71,6 +72,24 @@ def _now():
     return datetime.now().isoformat(timespec="seconds")
 
 
+_GENERIC_TITLE_RE = re.compile(
+    r"^(?:all groups you'?ve joined|groups|group|your groups|discover|explore"
+    r"|suggested|home|facebook)\b.*",
+    re.IGNORECASE,
+)
+
+
+def _is_generic_title(name):
+    name = (name or "").strip()
+    if not name:
+        return True
+    if _GENERIC_TITLE_RE.match(name):
+        return True
+    if re.fullmatch(r"\d[\d\s.,]*", name):
+        return True
+    return False
+
+
 class Database:
     def __init__(self, path=DB_PATH):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -108,11 +127,35 @@ class Database:
                     (group_id, name or "", member_count or 0, url or "", _now(), _now()),
                 )
             else:
+                curr_name = row["name"] or ""
+                curr_mc = row["member_count"] or 0
+                curr_url = row["url"] or ""
+
+                # Prefer real name over empty string, raw group id, or a generic
+                # list-page title (e.g. "All groups you've joined (75)") that
+                # leaks in when a group-page load bounces to the groups list.
+                new_name = curr_name
+                if name:
+                    if not _is_generic_title(name) and (
+                        not curr_name
+                        or _is_generic_title(curr_name)
+                        or curr_name == group_id
+                        or (name != group_id and len(name) >= len(curr_name))
+                    ):
+                        new_name = name
+
+                # Prefer positive member count over 0 / None
+                new_mc = curr_mc
+                if member_count is not None and member_count > 0:
+                    new_mc = member_count
+
+                new_url = url if url else (curr_url or f"https://www.facebook.com/groups/{group_id}/")
+
                 self.conn.execute(
-                    "UPDATE groups SET name = COALESCE(?, name), "
-                    "member_count = COALESCE(?, member_count), "
-                    "url = COALESCE(?, url), updated_at = ? WHERE id = ?",
-                    (name, member_count, url, _now(), group_id),
+                    "UPDATE groups SET name = ?, "
+                    "member_count = ?, "
+                    "url = ?, updated_at = ? WHERE id = ?",
+                    (new_name, new_mc, new_url, _now(), group_id),
                 )
             self.conn.commit()
 
@@ -168,6 +211,19 @@ class Database:
                 join_statuses,
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def count_by_join_status(self, *join_statuses):
+        """Count groups matching any of the given join_status values."""
+        with self._lock:
+            if not join_statuses:
+                return self.conn.execute(
+                    "SELECT COUNT(*) FROM groups"
+                ).fetchone()[0]
+            placeholders = ",".join("?" for _ in join_statuses)
+            return self.conn.execute(
+                f"SELECT COUNT(*) FROM groups WHERE join_status IN ({placeholders})",
+                join_statuses,
+            ).fetchone()[0]
 
     def get_group(self, group_id):
         with self._lock:
