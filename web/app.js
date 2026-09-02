@@ -75,6 +75,39 @@ function toast(text, level = "info") {
 function openModal(id) { $('#' + id).removeAttribute("hidden"); }
 function closeModal(id) { $('#' + id).setAttribute("hidden", ""); }
 
+function renderTodayPosts(posts) {
+  const list = $("#todayPostsList");
+  const empty = $("#todayPostsEmpty");
+  list.innerHTML = "";
+  if (!posts || !posts.length) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  for (const p of posts) {
+    const name = p.group_name || p.group_id || "Unknown group";
+    const file = p.file_path ? p.file_path.split(/[\\/]/).pop() : "";
+    const url = p.post_url || "";
+    const row = document.createElement("a");
+    row.className = "tp-row" + (url ? "" : " tp-row-no-link");
+    if (url) { row.href = url; row.target = "_blank"; row.rel = "noopener"; }
+    row.innerHTML =
+      `<span class="tp-name">${esc(name)}</span>` +
+      (file ? `<span class="tp-file">${esc(file)}</span>` : "") +
+      (url
+        ? `<span class="tp-goto">Open post ↗</span>`
+        : `<span class="tp-no-url">no link (pending/inactive)</span>`) +
+      `<span class="tp-time">${esc(fmtWhen(p.created_at))}</span>`;
+    list.appendChild(row);
+  }
+}
+
+function openTodayPosts() {
+  renderTodayPosts((state && state.current && state.current.posted_today) || []);
+  openModal("modalTodayPosts");
+}
+
+
 /* ============================================================
    CONTENT COMPOSER
    Single source of truth for the post caption + media staging.
@@ -1716,6 +1749,9 @@ function bind() {
   });
 
   $("#btnCopyLog").addEventListener("click", copyLogs);
+
+  // "posted today" chip -> open today's posted posts list
+  $("#postedChipBtn").addEventListener("click", openTodayPosts);
 
   // modal close wiring
   $$(".modal").forEach((m) => {

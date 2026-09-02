@@ -933,6 +933,7 @@ class AutomationState:
             "selected": sel,
             "settings": dict(self.config.settings),
             "posts_today": self.db.posts_today(),
+            "posted_today": self.db.posted_today_list(),
             "post_stats": self.db.post_stats(),
             "group_counts": group_counts,
             "media_count": self._count_media(),

@@ -72,9 +72,9 @@
         <div id="statusPill" class="pill idle">
           <span class="dot"></span><span id="statusText">Connecting…</span>
         </div>
-        <div class="chip" title="Posts marked as posted today">
+        <button class="chip chip-click" id="postedChipBtn" type="button" title="Click to see today's posted posts">
           <span class="chip-icon">▲</span><span id="postedChip">0</span> posted today
-        </div>
+        </button>
       </div>
     </header>
 
@@ -772,6 +772,25 @@
       <div class="head-spacer"></div>
       <button class="btn ghost" data-close="modalBrowse">Cancel</button>
       <button class="btn primary" id="btnBrowseSelect">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TODAY'S POSTS ============ -->
+<div class="modal" id="modalTodayPosts" hidden>
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Posts posted today</h3>
+      <button class="icon-btn" data-close="modalTodayPosts">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="todayPostsList" class="today-posts-list"></div>
+      <p class="hint" id="todayPostsEmpty">No posts posted today yet. Click each row to open its post.</p>
+    </div>
+    <div class="modal-foot">
+      <div class="head-spacer"></div>
+      <button class="btn ghost" data-close="modalTodayPosts">Close</button>
     </div>
   </div>
 </div>

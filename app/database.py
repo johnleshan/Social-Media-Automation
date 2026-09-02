@@ -295,6 +295,17 @@ class Database:
                 (f"{today}%",),
             ).fetchone()[0]
 
+    def posted_today_list(self):
+        """Today's successfull posts (status='posted'), newest first, as dicts."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM posts WHERE status='posted' AND created_at LIKE ? "
+                "ORDER BY id DESC",
+                (f"{today}%",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def recent_posts(self, limit=200):
         with self._lock:
             rows = self.conn.execute(
