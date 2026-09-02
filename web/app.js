@@ -1244,6 +1244,10 @@ function openSettings() {
   $("#setHeadless").checked = !!s.headless;
   $("#setScanOnStart").checked = !!s.scan_on_start;
   $("#setDevMode").checked = !!s.developer_mode;
+  $("#setPostableOnly").checked = s.postable_only ?? true;
+  $("#setNicheOnly").checked = s.niche_only ?? true;
+  $("#setNicheMaxMembers").value = s.niche_max_members ?? 150000;
+  $("#setMaxIdle").value = s.max_group_idle_days ?? 21;
   $("#setJoinDelayMin").value = s.join_delay_min ?? 30;
   $("#setJoinDelayMax").value = s.join_delay_max ?? 90;
   openModal("modalSettings");
@@ -1258,6 +1262,10 @@ async function saveSettings() {
     headless: $("#setHeadless").checked,
     scan_on_start: $("#setScanOnStart").checked,
     developer_mode: $("#setDevMode").checked,
+    postable_only: $("#setPostableOnly").checked,
+    niche_only: $("#setNicheOnly").checked,
+    niche_max_members: $("#setNicheMaxMembers").value,
+    max_group_idle_days: $("#setMaxIdle").value,
     join_delay_min: $("#setJoinDelayMin").value,
     join_delay_max: $("#setJoinDelayMax").value,
   };

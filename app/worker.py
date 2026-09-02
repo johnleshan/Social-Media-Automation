@@ -17,14 +17,15 @@ import random
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, date
 
 from .approval import check_group, check_membership_status
 from .browser import FacebookBrowser
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED
-from .discovery import search_groups, list_my_groups, extract_group_info_from_page
+from .discovery import (search_groups, list_my_groups, extract_group_info_from_page,
+                        extract_group_activity)
 from .joiner import join_group
-from .poster import post_media, post_media_to_page
+from .poster import post_media, post_media_to_page, group_is_page_postable
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".m4v"}
@@ -42,7 +43,7 @@ CHECKPOINT_PHRASES = [
 # bounces off a group URL onto one of these, the extracted "name" is garbage.
 _GENERIC_TITLE_RE = re.compile(
     r"^(?:all groups you'?ve joined|groups|group|your groups|discover|explore"
-    r"|suggested|home|facebook)\b.*",
+    r"|suggested|home|facebook|notifications|unread)\b.*",
     re.IGNORECASE,
 )
 
@@ -57,6 +58,69 @@ def _is_generic_title(name):
     if re.fullmatch(r"\d[\d\s.,]*", name):
         return True
     return False
+
+
+# Keyword tables for the niche filter (lower-cased, substring matching).
+# The post niche is online earning / side hustles / jobs / business.
+NICHE_KEYWORDS = [
+    "online", "earn", "earning", "income", "hustl", "side hustle", "money",
+    "digital", "cash", "business", "job", "jobs", "work", "freelanc",
+    "entrepreneur", "startup", "invest", "marketing", "affiliate", "network",
+    "profit", "sales", "trading", "paypal", "remit", "cashapp", "moneypay",
+    "opportunit", "gig", "market", "ecommerce", "shop",
+]
+# Kenya / East-Africa group names rank higher (the user only wants Kenya).
+KENYA_KEYWORDS = [
+    "kenya", "kenyan", "nairobi", "nakuru", "mombasa", "kisumu", "eldoret",
+    "thika", "naivasha", "machakos", "meru", "kitale", "garissa", "uganda",
+    "ugandan", "tanzania", "tanzanian", "east africa", "africa",
+]
+# Other-region groups are hard-excluded; we only post to Kenyan-region groups.
+OTHER_REGION_KEYWORDS = [
+    "india", "indian", "pakistan", "bangladesh", "nepal", "sri lanka", "nigeria",
+    "nigerian", "ghana", "ghanian", "south africa", "ethiopia", "egypt",
+    "morocco", "tunisia", "united states", "u.s.", "usa", "america", "canada",
+    "mexico", "brazil", "argentina", "uk", "britain", "british", "england",
+    "london", "europe", "france", "french", "germany", "italy", "spain",
+    "russia", "turkey", "philippines", "indonesia", "malaysia", "singapore",
+    "uae", "dubai", "saudi", "qatar", "kuwait", "australia", "new zealand",
+]
+# Mega / highly moderated communities escalate posts to reviews and decline
+# Page posts; skip them so the batch targets small, low-regulation groups.
+MEGA_KEYWORDS = [
+    "university", "universities", "students", "campus", "school", "college",
+    "church", "churches", "gospel", "christian", "fellowship", "ministry",
+    "islam", "muslim", "mosque",
+]
+# Clearly off-topic communities (fun, retail, maybe items, etc.).
+OFF_TOPIC_KEYWORDS = [
+    "memes", "jokes", "comedy", "funny", "poems", "entertainment", "movies",
+    "gaming", "football", "sports", "recipes", "cooking", "fashion", "beaut",
+    "music", "dancing", "photography", "second hand", "buy and sell", "maisha yo",
+    "fun times",
+]
+# Generic / list-page names that pollute the pool (from broken sync extraction).
+JUNK_NAME_TOKENS = ["notifications", "unread", "all groups", "your groups",
+                    "suggested", "discover"]
+
+
+def _niche_score_name(name):
+    """Score a raw group name for niche relevance + region.
+    Returns (niche_score, region_score) or None if the name disqualifies it."""
+    low = (name or "").lower().strip()
+    if not low or _is_generic_title(name):
+        return None
+    if any(t in low for t in JUNK_NAME_TOKENS):
+        return None
+    if any(k in low for k in OTHER_REGION_KEYWORDS):
+        return None
+    if any(k in low for k in MEGA_KEYWORDS) or any(k in low for k in OFF_TOPIC_KEYWORDS):
+        return None
+    niche_hits = sum(2 for k in NICHE_KEYWORDS if k in low)
+    region_hits = sum(3 for k in KENYA_KEYWORDS if k in low)
+    if not niche_hits:
+        return None
+    return niche_hits, region_hits
 
 
 def _looks_like_group_page(final_url, target_id):
@@ -961,11 +1025,67 @@ class Worker:
             except Exception:
                 pass
 
+        # 1b. Kenya + niche + size pre-filter (in-memory on stored group names).
+        #     Off-region, mega, off-topic and unverifiable (junk-named) groups
+        #     are dropped; qualifying groups sort by niche relevance then
+        #     smallest-first (smaller = less regulated).
+        niche = bool(settings.get("niche_only", True))
+        if niche:
+            targets, dropped = self._rank_niche(targets)
+            if dropped:
+                kept_n = len(targets)
+                self._emit(
+                    f"[niche] kept {kept_n} Kenya/East-Africa niche group(s) "
+                    f"from {kept_n + dropped} joined; dropped "
+                    f"{dropped} off-region/mega/off-topic/unverifiable."
+                )
+
         batch_targets = targets[:batch]
         if not batch_targets:
-            self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
-            self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
+            if niche:
+                self._final_summary = (
+                    "No Kenya niche group matches your post — all your joined "
+                    "groups are mega/off-topic/unverifiable. Sync or join more "
+                    "niche groups, then press Post Batch again."
+                )
+                self._emit("No Kenya niche group to target. Sync/join niche groups first.")
+            else:
+                self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
+                self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
             return
+
+        # Pre-flight: only keep groups the Page can actually post to. Closed /
+        # Page-blocked groups otherwise burn a full upload + cooldown cycle, so
+        # skip them up front and count them as covered for this cycle.
+        blocked = []
+        if bool(settings.get("postable_only", True)):
+            self._set_stage("prepare", "Filtering to Page-postable groups",
+                            "Checking which groups allow Page posts...")
+            batch_targets, blocked = self._filter_page_postable(
+                batch_targets, self._set_stage
+            )
+            for bg in blocked:
+                done.add(str(bg["id"]))
+            if blocked:
+                self._emit(
+                    f"Skipped {len(blocked)} group(s) (closed to Page posts or "
+                    "inactive) - only posting to open, active groups."
+                )
+            try:
+                self.db.set_state("blast_done", json.dumps(sorted(done)))
+            except Exception:
+                pass
+
+            if not batch_targets:
+                self._final_summary = (
+                    f"All {len(blocked)} target group(s) are closed to Page posts. "
+                    "No open group to post to this press."
+                )
+                self.db.set_state("blast_progress", json.dumps({
+                    "done": len(done), "total": len(targets_all),
+                }))
+                self._emit("No open/Page-postable group to post to this press.")
+                return
 
         self.db.set_state("blast_progress", json.dumps({
             "done": len(done), "total": len(targets_all),
@@ -1032,19 +1152,21 @@ class Worker:
                 )
                 self._wait_stop(interval=1, total=delay)
 
+        skip_note = f" · {len(blocked)} skipped (closed to Pages)" if blocked else ""
         self._final_summary = (
-            f"{posted_n} posted · {failed_n} failed this batch · "
+            f"{posted_n} posted · {failed_n} failed this batch{skip_note} · "
             f"{len(done)}/{len(targets_all)} groups covered this cycle"
         )
         self._emit(
             f"Batch finished: {posted_n} post(s) this press, "
-            f"{len(done)}/{len(targets_all)} of your groups posted this cycle. "
+            f"{len(done)}/{len(targets_all)} of your groups posted this cycle"
+            f"{skip_note}. "
             f"{failed_n} failed and will be retried next press. "
             "Press Post Batch again to continue."
         )
         if self.notify:
             self.notify("Batch posting done",
-                        f"{posted_n} posted · {failed_n} failed · "
+                        f"{posted_n} posted · {failed_n} failed{skip_note} · "
                         f"{len(done)}/{len(targets_all)} groups this cycle")
 
     # ---- page post ----
@@ -1154,6 +1276,93 @@ class Worker:
         self._final_summary = f"{self._posted_this_run} post(s) published this run."
         if self.notify:
             self.notify("Posting stopped", f"{self._posted_this_run} posted this run")
+
+    def _rank_niche(self, groups):
+        """In-memory Kenya + niche + size pre-filter.
+
+        Returns (kept, dropped_count). Kept groups are niche-relevant, not
+        explicitly another region, not mega/off-topic, not over the member-size
+        cap, and carry a real (non-junk) name. Sort: niche relevance desc, then
+        smallest-first so the batch hits low-regulation groups first.
+        """
+        max_members = int(self.config.settings.get("niche_max_members", 0) or 0)
+        kept, dropped = [], 0
+        for g in groups:
+            score = _niche_score_name(g.get("name") or "")
+            if score is None:
+                dropped += 1
+                continue
+            mc = int(g.get("member_count") or 0)
+            if max_members and mc and mc > max_members:
+                dropped += 1
+                continue
+            niche_hits, region_hits = score
+            kept.append((-(niche_hits + region_hits), mc or 0, g))
+        kept.sort(key=lambda t: (t[0], t[1], str(t[2].get("name") or t[2]["id"]).lower()))
+        return [t[2] for t in kept], dropped
+
+    def _filter_page_postable(self, groups, set_stage=None):
+        """Partition groups into those a Page can actually post to. Loads each
+        group page once and keeps only groups where the Page sees an open
+        photo/video composer (no 'doesn't allow Pages' gate). While the live
+        page is already open we also refresh the real name/member count (fixes
+        the polluting 'Notifications' names) and read the group's activity so
+        inactive groups (no recent posts) can be skipped. A load error is
+        treated as postable (optimistic) so a transient failure can't skip a
+        whole batch. Returns (postable, blocked)."""
+        settings = self.config.settings
+        max_idle = int(settings.get("max_group_idle_days", 0) or 0)
+        postable, blocked = [], []
+        n = len(groups)
+        for i, g in enumerate(groups, 1):
+            if self._stop.is_set():
+                break
+            name = g.get("name") or g["id"]
+            if set_stage:
+                set_stage("prepare", f"[{i}/{n}] {name}",
+                          f"Checking if Pages can post to {name}...")
+            try:
+                ok = group_is_page_postable(self.browser.page, g["id"], self._emit)
+            except Exception:
+                ok = True
+            if not ok:
+                blocked.append(g)
+                self._emit(f"[SKIP] {name}: not open to Page posts")
+                continue
+            # Refresh real name/count from the live group page and persist it,
+            # so the pool's stale list-page names get progressively fixed.
+            try:
+                info = extract_group_info_from_page(self.browser.page, fallback_about=False)
+                if info.get("name") or info.get("member_count"):
+                    self.db.upsert_group(
+                        g["id"], name=info.get("name"),
+                        member_count=info.get("member_count"),
+                    )
+                    if info.get("name") and not _is_generic_title(info["name"]):
+                        g["name"] = info["name"]
+                    if info.get("member_count"):
+                        g["member_count"] = info["member_count"]
+            except Exception:
+                pass
+            # Activity gate: skip groups whose newest signal is older than the
+            # idle limit. Unknown (no signal) is kept — the group may still be
+            # active but the page didn't expose timestamps.
+            if max_idle:
+                try:
+                    act = extract_group_activity(self.browser.page)
+                    if act.get("days") is not None:
+                        self.db.upsert_group(g["id"], last_active_days=act["days"])
+                        if act["days"] > max_idle:
+                            blocked.append(g)
+                            self._emit(
+                                f"[SKIP] {g.get('name') or g['id']}: last activity "
+                                f"{act['days']}d ago (>{max_idle}d) — group inactive"
+                            )
+                            continue
+                except Exception:
+                    pass
+            postable.append(g)
+        return postable, blocked
 
     def _post_one(self, g, file_path, caption):
         self._set_stage("publish", g.get("name") or g["id"],

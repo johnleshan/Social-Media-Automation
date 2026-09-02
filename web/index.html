@@ -614,6 +614,19 @@
         <span>Re-check unclassified groups on start</span>
         <span class="switch"><input type="checkbox" id="setScanOnStart"><i></i></span>
       </label>
+      <label class="switch-row">
+        <span>Target open/postable groups only<br><small>Skipped groups that don't allow Page posts so the batch doesn't waste time on closed groups.</small></span>
+        <span class="switch"><input type="checkbox" id="setPostableOnly"><i></i></span>
+      </label>
+      <label class="switch-row">
+        <span>Target Kenya niche & active groups<br><small>Only posts to Kenya/East-Africa groups whose name matches the post niche (online earning, jobs, business...), skips mega/regulated communities, and skips inactive groups (last activity older than the idle limit).</small></span>
+        <span class="switch"><input type="checkbox" id="setNicheOnly"><i></i></span>
+      </label>
+      <div class="field-row">
+        <div class="field"><label for="setNicheMaxMembers">Max group size (members)</label><input id="setNicheMaxMembers" type="number" min="0" step="1000"></div>
+        <div class="field"><label for="setMaxIdle">Max idle days (activity)</label><input id="setMaxIdle" type="number" min="1" step="1"></div>
+      </div>
+      <p class="hint">Smaller groups are less regulated and far less likely to decline Page posts. Groups with no recent activity (e.g. dead since 2020) are skipped entirely.</p>
       <label class="switch-row dev-toggle">
         <span><strong>Developer mode</strong><br><small>Lifts every cap: no daily post cap, no 10/day join limit, and group scraping scrolls the whole feed with no early-stop so all 100+ groups are captured.</small></span>
         <span class="switch"><input type="checkbox" id="setDevMode"><i></i></span>

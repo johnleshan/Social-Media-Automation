@@ -59,6 +59,14 @@ CAPTION_LABELS = [
 
 POST_BUTTONS = ["post", "share now", "share"]
 
+PAGES_BLOCKED_PHRASES = [
+    "doesn't allow pages",
+    "don't allow pages",
+    "does not allow pages",
+    "do not allow pages",
+    "not allow pages",
+]
+
 
 def _click_composer_media(page, log):
     """Open the media composer. Returns True on success."""
@@ -157,6 +165,21 @@ def _safe_text(page):
         return ""
 
 
+def _visible_dialogs_text(page, max_chars=400):
+    """Text of every [role=dialog], for diagnosing stuck composers."""
+    parts = []
+    try:
+        for i, handle in enumerate(page.query_selector_all(DIALOG)):
+            try:
+                txt = (handle.inner_text() or "").replace("\n", " ").strip()
+            except Exception:
+                continue
+            parts.append(f"[{i}] {txt[:max_chars]}")
+    except Exception:
+        pass
+    return " | ".join(parts)
+
+
 def _caption_locator(page):
     # Group composer caption ("Create a public post…") has no aria-label and
     # can sit in a dialog that isn't the first one in the DOM, so prefer a
@@ -242,31 +265,63 @@ def _fill_caption(page, caption):
     return False
 
 
-def _click_post(page, log):
-    """Click the post/submit button in the dialog. Returns True on success."""
-    # Retry window: the confirmation dialog may take a moment to render.
-    deadline = time.monotonic() + 14
-    while time.monotonic() < deadline:
-        for name in POST_BUTTONS:
+def _composer_dialog(page):
+    """Locator of the visible composer dialog that still holds our caption text
+    (the one we must submit). Scoped this way avoids ghost dialogs and the
+    notifications side-panel, whose stray 'Post' buttons can otherwise swallow
+    the click and leave the real composer open."""
+    try:
+        dlg = page.locator(f'{DIALOG}:visible')
+        n = dlg.count()
+        for i in range(n):
+            el = dlg.nth(i)
             try:
-                btn = page.get_by_role("button", name=re.compile(f"^{re.escape(name)}$", re.IGNORECASE)).first
-                if btn.is_visible(timeout=1000):
-                    btn.click(timeout=4000)
-                    return True
+                ce = el.locator(f'[contenteditable="true"]:visible')
+                cn = ce.count()
+                for j in range(cn):
+                    try:
+                        txt = (ce.nth(j).inner_text() or "").strip()
+                    except Exception:
+                        txt = ""
+                    if txt:
+                        return el
             except Exception:
                 continue
-        # Fallback: any button inside the dialog whose text contains post/share
-        try:
-            dlg = page.query_selector(DIALOG)
-            if dlg:
-                buttons = dlg.query_selector_all("button")
-                for b in buttons:
-                    txt = (b.inner_text() or "").strip().lower()
-                    if txt in POST_BUTTONS or txt.startswith("post "):
-                        b.click(timeout=4000)
+    except Exception:
+        pass
+    return None
+
+
+def _click_post(page, log):
+    """Click the post/submit button in the composer dialog. Returns True on success."""
+    # Retry window: the confirmation dialog may take a moment to render.
+    deadline = time.monotonic() + 16
+    while time.monotonic() < deadline:
+        dlg = _composer_dialog(page)
+        candidates = [dlg] if dlg is not None else []
+        if not candidates:
+            # No caption visible yet; fall back to any visible dialog (scoped,
+            # never a page-global search that can hit the notifications panel).
+            try:
+                vd = page.locator(f'{DIALOG}:visible')
+                n = vd.count()
+                for i in range(min(n, 8)):
+                    candidates.append(vd.nth(i))
+            except Exception:
+                pass
+        for d in candidates:
+            for name in POST_BUTTONS:
+                try:
+                    btn = d.get_by_role(
+                        "button",
+                        name=re.compile(f"^{re.escape(name)}$", re.IGNORECASE),
+                    ).first
+                    if btn.is_visible(timeout=600):
+                        btn.click(timeout=4000)
+                        log(f"clicked post button '{name}' in composer")
                         return True
-        except Exception:
-            pass
+                except Exception:
+                    continue
         page.wait_for_timeout(700)
     return False
 
@@ -280,21 +335,39 @@ def _detect_pending(page):
 
 
 def _detect_success(page):
-    """Return True if the dialog is gone and no pending signal is present."""
-    page.wait_for_timeout(3000)
-    dlg = None
-    try:
-        dlg = page.query_selector(DIALOG)
-    except Exception:
-        pass
-    if dlg and dlg.is_visible():
-        return False
-    # A "your post was posted" style confirmation is ideal but optional.
-    body = _safe_text(page).lower()
-    for phrase in ["your post was posted", "post is live", "shared to group"]:
-        if phrase in body:
+    """Return True once the composer closes (the post went through).
+
+    Facebook keeps the composer open with a 'Posting' label while media is
+    still being pushed, sometimes 15-40s for a video, so short fixed waits
+    produce false failures. Poll until the composer (a visible dialog whose
+    contenteditable still holds our caption) is gone, up to the deadline.
+    """
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        open_composer = False
+        try:
+            q = page.locator(f'{DIALOG}:visible [contenteditable="true"]:visible')
+            n = q.count()
+            for i in range(n):
+                el = q.nth(i)
+                try:
+                    txt = (el.inner_text() or "").strip()
+                except Exception:
+                    txt = ""
+                if txt:
+                    open_composer = True
+                    break
+        except Exception:
+            pass
+        if not open_composer:
+            # A "your post was posted" style confirmation is ideal but optional.
+            body = _safe_text(page).lower()
+            for phrase in ["your post was posted", "post is live", "shared to group"]:
+                if phrase in body:
+                    return True
             return True
-    return True
+        page.wait_for_timeout(4000)
+    return False
 
 
 def post_media(page, group_id, file_path, caption="", log=None):
@@ -327,7 +400,87 @@ def post_media(page, group_id, file_path, caption="", log=None):
         return "pending", "post routed to admin approval"
     if _detect_success(page):
         return "posted", "published"
+    log(f"[diag] url={page.url}")
+    log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
     return "failed", "unable to confirm post outcome"
+
+
+def _has_media_composer(page):
+    """True if a photo/video attach affordance is available on the page (the
+    Page can post here). Mirrors _click_composer_media exactly so the pre-flight
+    filter and the actual posting logic never diverge. Uses real geometry
+    (getBoundingClientRect) rather than ElementHandle.is_visible(), which is
+    unreliable with Facebook's layered dialogs."""
+    # 1. role/accessibility match.
+    for label in COMPOSER_PHOTO_LABELS:
+        try:
+            btn = page.get_by_role("button", name=re.compile(re.escape(label), re.IGNORECASE)).first
+            if btn.is_visible(timeout=1200):
+                return True
+        except Exception:
+            continue
+    # 2. DOM scan: any element with a real on-screen box whose label contains a
+    #    media keyword. Same check that successfully opened the composer.
+    try:
+        ok = page.evaluate(
+            """(labels)=>{
+                const els=document.querySelectorAll('[role="button"],[aria-label],button,span');
+                for(const el of els){
+                    const aria=(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                    const txt=(el.innerText||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                    const hay=aria+' '+txt;
+                    if(!hay) continue;
+                    for(const L of labels){
+                        if(hay.includes(L)){
+                            const r=el.getBoundingClientRect();
+                            if(r.width&&r.height) return true;
+                        }
+                    }
+                }
+                return false;
+            }""",
+            [L.lower() for L in COMPOSER_PHOTO_LABELS],
+        )
+        if ok:
+            return True
+    except Exception:
+        pass
+    # 3. Visible file input (some layouts expose it without a click).
+    try:
+        return page.locator('input[type="file"]:visible').count() > 0
+    except Exception:
+        return False
+
+
+def group_is_page_postable(page, group_id, log=None):
+    """Return True only if the group is open to posting as the current identity
+    (the Page): no 'doesn't allow Pages' banner, no 'Join Group' gate, and a
+    visible photo/video composer. A load error is treated as postable
+    (optimistic) so a transient network failure can't skip a whole batch."""
+    log = log or (lambda msg: print(msg))
+    url = f"https://www.facebook.com/groups/{group_id}/"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2500)
+    except Exception as e:
+        log(f"[postable-check] load error for {group_id}: {e}")
+        return True
+    body = _safe_text(page).lower()
+    for phrase in PAGES_BLOCKED_PHRASES:
+        if phrase in body:
+            log(f"[postable-check] {group_id}: Pages blocked ('{phrase}')")
+            return False
+    # A visible composer is authoritative: if we can click media + post, the
+    # group is postable. Checking this before the generic 'join group' phrase
+    # avoids false negatives where stray 'Join group' text appears alongside a
+    # real composer (e.g. KENYANS ONLINE, which demonstrably accepts Page posts).
+    if _has_media_composer(page):
+        return True
+    if re.search(r"\bjoin group\b", body):
+        log(f"[postable-check] {group_id}: not a member, join gate shown")
+        return False
+    log(f"[postable-check] {group_id}: no visible media composer")
+    return False
 
 
 PAGE_CAPTION_STRINGS = [

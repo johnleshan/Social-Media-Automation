@@ -1,4 +1,4 @@
-"""SQLite persistence for groups, post history and rotation state."""
+"""SQLite persistence for groups, post history, activity signals and rotation state."""
 import os
 import re
 import sqlite3
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS groups (
     join_checked_at TEXT,
     times_posted INTEGER DEFAULT 0,
     last_posted_at TEXT,
+    last_active_days INTEGER,
     created_at TEXT,
     updated_at TEXT
 );
@@ -74,7 +75,7 @@ def _now():
 
 _GENERIC_TITLE_RE = re.compile(
     r"^(?:all groups you'?ve joined|groups|group|your groups|discover|explore"
-    r"|suggested|home|facebook)\b.*",
+    r"|suggested|home|facebook|notifications|unread)\b.*",
     re.IGNORECASE,
 )
 
@@ -110,12 +111,15 @@ class Database:
             )
         if "join_checked_at" not in cols:
             self.conn.execute("ALTER TABLE groups ADD COLUMN join_checked_at TEXT")
+        if "last_active_days" not in cols:
+            self.conn.execute("ALTER TABLE groups ADD COLUMN last_active_days INTEGER")
 
     def close(self):
         self.conn.close()
 
     # ---- groups ----
-    def upsert_group(self, group_id, name=None, member_count=None, url=None):
+    def upsert_group(self, group_id, name=None, member_count=None, url=None,
+                     last_active_days=None):
         with self._lock:
             row = self.conn.execute(
                 "SELECT * FROM groups WHERE id = ?", (group_id,)
@@ -151,11 +155,15 @@ class Database:
 
                 new_url = url if url else (curr_url or f"https://www.facebook.com/groups/{group_id}/")
 
+                new_active = row["last_active_days"]
+                if last_active_days is not None:
+                    new_active = last_active_days
+
                 self.conn.execute(
                     "UPDATE groups SET name = ?, "
                     "member_count = ?, "
-                    "url = ?, updated_at = ? WHERE id = ?",
-                    (new_name, new_mc, new_url, _now(), group_id),
+                    "url = ?, last_active_days = ?, updated_at = ? WHERE id = ?",
+                    (new_name, new_mc, new_url, new_active, _now(), group_id),
                 )
             self.conn.commit()
 

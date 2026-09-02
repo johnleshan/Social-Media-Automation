@@ -5,6 +5,7 @@ Two modes:
   * hard    : query + the keyword must appear in the group name and (optionally)
               the group must meet a minimum member count.
 """
+import datetime
 import re
 from urllib.parse import quote_plus
 
@@ -183,6 +184,197 @@ def _clean_group_name(name):
     ):
         return ""
     return name.strip()
+
+
+_REL_FAST_UNITS = {"min": 0, "mins": 0, "h": 0, "hr": 0, "hrs": 0, "hours": 0, "hour": 0}
+_REL_UNITS = {"d": 1, "day": 1, "days": 1, "w": 7, "wk": 7, "week": 7, "weeks": 7,
+              "mo": 30, "month": 30, "months": 30, "yr": 365, "y": 365,
+              "year": 365, "years": 365}
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+_MONTH_FULL = {m: i + 1 for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"])}
+_MONTH_KEYWORDS = sorted(
+    set(_MONTH_FULL) | {k + "." for k in _MONTHS} | set(_MONTHS), key=len, reverse=True)
+_MONTH_LOOKUP = {}
+_MONTH_LOOKUP.update(_MONTHS)
+_MONTH_LOOKUP.update(_MONTH_FULL)
+for k, v in list(_MONTHS.items()):
+    _MONTH_LOOKUP[k + "."] = v
+
+
+def _days_since(year, month=1, day=1, today=None):
+    try:
+        d = datetime.date(year, month, day)
+        return max(0, (today - d).days if today else (datetime.date.today() - d).days)
+    except Exception:
+        return None
+
+
+def _relative_to_days(label):
+    """Convert a Facebook relative time token (e.g. '3 h', '2 d', '4 w', '2 mo',
+    '1 yr', 'just now', 'Active 2 days ago') to days since. Returns None if
+    unparseable."""
+    label = label.lower().strip()
+    if not label:
+        return None
+    if label in ("now", "just now", "active now", "now active"):
+        return 0
+    m = re.match(r"^(?:active|last active)?\s*(\d{1,3})\s*([a-z]+)\s*ago?$", label)
+    if not m:
+        m = re.match(r"^(\d{1,3})\s*([a-z]+)$", label)
+    if not m:
+        words = label.split()
+        # 'Active 2 days ago' style where words may differ
+        m = re.match(r"^active\s+(\d{1,3}|\d{1,2}(?:\.\d)?)\s+([a-z ]+?)\s+ago$", label)
+        if m:
+            num = float(m.group(1))
+            unit = m.group(2).strip().rstrip("s")
+            for key, val in list(_REL_UNITS.items()) + list(_REL_FAST_UNITS.items()):
+                if unit == key:
+                    if val == 0:
+                        return 0
+                    return int(round(num * val))
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2).lower().rstrip("s")
+    if unit in _REL_FAST_UNITS:
+        return 0
+    if unit in _REL_UNITS:
+        return int(round(num * _REL_UNITS[unit]))
+    return None
+
+
+def _absolute_to_days(text):
+    """Parse an absolute date ('5 February 2021', 'Feb 2020', '12 May 2020',
+    'September 2020') to days since. Returns None on failure."""
+    text = text.lower().strip()
+    today = datetime.date.today()
+    m = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+\.?)\s+(19|20\d{2})$", text)
+    if m:
+        mon = _MONTH_LOOKUP.get(m.group(2))
+        if mon:
+            return _days_since(int(m.group(3)), mon, int(m.group(1)), today)
+    m = re.match(r"^([a-z]+\.?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(19|20\d{2})$", text)
+    if m:
+        mon = _MONTH_LOOKUP.get(m.group(1))
+        if mon:
+            return _days_since(int(m.group(3)), mon, int(m.group(2)), today)
+    m = re.match(r"^([a-z]+\.?)\s+(19|20\d{2})$", text)
+    if m:
+        mon = _MONTH_LOOKUP.get(m.group(1))
+        if mon:
+            return _days_since(int(m.group(2)), mon, 1, today)
+    return None
+
+
+def _extract_feed_times(page):
+    """Pull the timestamp anchors inside the group feed ('3 h', '2 d', 'Feb 2020')."""
+    try:
+        return page.evaluate(
+            """() => {
+                const feed = document.querySelector('div[role="feed"]') || document.body;
+                const out = [];
+                const re = /(?:just now|\\d{1,3}\\s*(?:minutes?|mins?|hours?|hrs|hr|days?|weeks?|months?|mo|mon|years?|yrs?|d|w)\\b|\\d{1,3}\\s*h\\b|(?:[a-z]{3,9}\\.?)\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,)?\\s+(?:19|20)\\d{2}\\b|\\b(?:19|20)\\d{2}\\b)/i;
+                const links = feed.querySelectorAll('a[href*="/groups/"][href*="/permalink/"], a[href*="/posts/"]');
+                for (const a of links) {
+                    const t = (a.innerText || '').trim();
+                    if (t && re.test(t) && t.length < 25) out.push(t);
+                }
+                if (out.length === 0) {
+                    const src = feed.innerText || '';
+                    const lines = src.split(/\\n+/);
+                    for (const ln of lines) {
+                        const t = ln.trim();
+                        if (re.test(t) && t.length < 25 && !/members?|people|joined/i.test(t)) { out.push(t); }
+                    }
+                }
+                return out.slice(0, 60);
+            }"""
+        )
+    except Exception:
+        return []
+
+
+def extract_group_activity(page):
+    """Estimate a group's activity from its live page.
+
+    Returns {'days': int|None, 'raw': str|None} where `days` is the number of
+    days since the newest signal found (posts in the feed or a header
+    'Active x ago' label). None means no usable signal was found.
+    """
+    today = datetime.date.today()
+    candidates = []
+
+    # 1. Header/subtitle 'Active ... ago' / 'last active ...'. FB puts the
+    #    activity label in the header area near the group name; scan the h1 and
+    #    the top of the body to cover subtitle placements.
+    try:
+        pieces = []
+        h1 = page.query_selector("h1, [role='heading'][aria-level='1']")
+        if h1:
+            pieces.append((_safe_dom_text(h1) or "")[:4000])
+        pieces.append((_safe_dom_text(page.locator("body")) or "")[:4000])
+        text = "\n".join(p for p in pieces if p)
+        for m in re.finditer(
+            r"(?:active|last active)\s+(?:([\d.]{1,3})\s*([a-z]+)|(this\s+week|this\s+month|this\s+year|this\s+day|today|now))\s*(?:ago)?\b",
+            text.lower(),
+        ):
+            if m.group(3):
+                w = m.group(3)
+                days = {"this day": 0, "today": 0, "now": 0, "this week": 7,
+                        "this month": 30, "this year": 365}.get(w, 7)
+                candidates.append((days, m.group(0)))
+            else:
+                d = _relative_to_days(f"{m.group(1)} {m.group(2)} ago")
+                if d is not None:
+                    candidates.append((d, m.group(0)))
+    except Exception:
+        pass
+
+    # 2. Feed timestamps (most recent visible posts)
+    try:
+        for token in _extract_feed_times(page):
+            low = token.lower()
+            if low in ("now", "just now"):
+                candidates.append((0, low))
+                continue
+            d = _relative_to_days(low)
+            if d is not None:
+                candidates.append((d, low))
+                continue
+            d = _absolute_to_days(low)
+            if d is not None:
+                candidates.append((d, low))
+    except Exception:
+        pass
+
+    # 3. 'Active this month'/'this week' style header plus bare years as a
+    #    coarse upper bound: a 2020 group is dead even without explicit posts.
+    for m in re.finditer(r"\b(19|20\d{2})\b", (_safe_dom_text(page) or "")[:20000]):
+        try:
+            yr = int(m.group(1) or m.group(0))
+        except ValueError:
+            continue
+        if 1995 <= yr <= today.year:
+            candidates.append((_days_since(yr, 12, 31, today), str(yr)))
+
+    if not candidates:
+        return {"days": None, "raw": None}
+    days = max(0, min(c for c, _raw in candidates))
+    raw = min(candidates, key=lambda x: x[0])[1]
+    return {"days": days, "raw": raw}
+
+
+def _safe_dom_text(node):
+    try:
+        return node.inner_text() or ""
+    except Exception:
+        return ""
 
 
 def extract_group_info_from_page(page, fallback_about=True):

@@ -679,7 +679,7 @@ class AutomationState:
         s = self.config.settings
         updates = {}
         for key in ("delay_min", "delay_max", "soft_cap", "max_cycle_posts", "min_members",
-                    "join_delay_min", "join_delay_max"):
+                    "join_delay_min", "join_delay_max", "niche_max_members", "max_group_idle_days"):
             if key in data:
                 updates[key] = _to_int(data[key], _to_int(s.get(key), 0))
         if "headless" in data:
@@ -688,6 +688,10 @@ class AutomationState:
             updates["scan_on_start"] = bool(data["scan_on_start"])
         if "developer_mode" in data:
             updates["developer_mode"] = bool(data["developer_mode"])
+        if "postable_only" in data:
+            updates["postable_only"] = bool(data["postable_only"])
+        if "niche_only" in data:
+            updates["niche_only"] = bool(data["niche_only"])
         if "media_folder" in data and str(data.get("media_folder") or "").strip():
             updates["media_folder"] = str(data["media_folder"]).strip()
         if updates:
