@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS posts (
     file_path TEXT,
     status TEXT NOT NULL,
     error TEXT,
+    post_url TEXT,
     created_at TEXT
 );
 
@@ -113,6 +114,9 @@ class Database:
             self.conn.execute("ALTER TABLE groups ADD COLUMN join_checked_at TEXT")
         if "last_active_days" not in cols:
             self.conn.execute("ALTER TABLE groups ADD COLUMN last_active_days INTEGER")
+        post_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(posts)").fetchall()}
+        if "post_url" not in post_cols:
+            self.conn.execute("ALTER TABLE posts ADD COLUMN post_url TEXT")
 
     def close(self):
         self.conn.close()
@@ -260,12 +264,12 @@ class Database:
             return self.conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
 
     # ---- posts ----
-    def add_post(self, group_id, group_name, file_path, status, error=""):
+    def add_post(self, group_id, group_name, file_path, status, error="", post_url=""):
         with self._lock:
             cur = self.conn.execute(
-                "INSERT INTO posts (group_id, group_name, file_path, status, error, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (group_id, group_name, file_path, status, error, _now()),
+                "INSERT INTO posts (group_id, group_name, file_path, status, error, post_url, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (group_id, group_name, file_path, status, error, post_url or "", _now()),
             )
             if status == "posted":
                 self.conn.execute(

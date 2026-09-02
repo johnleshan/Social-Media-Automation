@@ -370,39 +370,155 @@ def _detect_success(page):
     return False
 
 
+# Matches the permalink shape Facebook uses for group posts:
+#   https://www.facebook.com/groups/{id}/posts/{post_id}/
+#   https://www.facebook.com/groups/{id}/permalink/{post_id}/
+# Group ids may be numeric or an alphanumeric vanity slug.
+_GROUP_POST_RE = re.compile(
+    r"/groups/[^/]+/(?:posts|permalink)/[^/]+"
+)
+
+
+def _group_post_urls(page):
+    """List {href, text} for every post card currently rendered in the group
+    feed, in DOM order (topmost first). Text is the post card's visible text
+    (the caption sits inside it), used to match the post we just made."""
+    try:
+        rows = page.evaluate(
+            """() => {
+                const feed = document.querySelector('div[role="feed"]');
+                const roots = [];
+                if (feed) {
+                    feed.querySelectorAll('div[role="article"], article').forEach(el => roots.push(el));
+                }
+                if (!roots.length && feed) {
+                    feed.querySelectorAll('a[href*="/posts/"], a[href*="/permalink/"]').forEach(a => {
+                        let root = a;
+                        for (let i = 0; i < 7 && root.parentElement && root.parentElement !== document.body; i++) {
+                            root = root.parentElement;
+                        }
+                        if (!root.hasAttribute('data-x-excluded')) {
+                            roots.push(root);
+                            root.setAttribute('data-x-excluded', '1');
+                        }
+                    });
+                }
+                const out = [];
+                const re = /\\/groups\\/[^/]+\\/(?:posts|permalink)\\/[^/]+/;
+                for (const r of roots) {
+                    const links = r.querySelectorAll('a[href*="/groups/"], a[href*="/permalink/"]');
+                    for (const a of links) {
+                        const href = a.href || '';
+                        if (re.test(href)) {
+                            out.push({
+                                href: href,
+                                text: (r.innerText || '').replace(/\\s+/g, ' ').slice(0, 300),
+                            });
+                            break;
+                        }
+                    }
+                }
+                return out;
+            }"""
+        )
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        return []
+
+
+def _make_full_url(page, href):
+    if not href:
+        return None
+    if not (href.startswith("http://") or href.startswith("https://")):
+        href = "https://www.facebook.com" + (href if href.startswith("/") else "/" + href)
+    try:
+        return href.split("?", 1)[0]
+    except Exception:
+        return href
+
+
+def _caption_token(caption):
+    token = re.sub(r"[^a-z0-9]+", " ", (caption or "").lower()).strip()
+    return token[:40] if token else None
+
+
+def _pick_post_url(page, before, caption):
+    """Find the URL of the post we just published.
+
+    1. a permalink seen *after* posting that wasn't there before, whose card
+       text contains the caption token
+    2. any card whose text contains the caption token
+    3. the newest (diffed) permalink
+    4. the topmost permalink as a last resort
+    """
+    token = _caption_token(caption)
+    after = _group_post_urls(page)
+    if not after:
+        return None
+    before_hrefs = {p.get("href") for p in (before or [])}
+    new = [p for p in after if p.get("href") not in before_hrefs]
+
+    def matches(p):
+        if not token or not p.get("text"):
+            return False
+        return token in p["text"].lower()
+
+    for p in new:
+        if matches(p):
+            return _make_full_url(page, p["href"])
+    for p in after:
+        if matches(p):
+            return _make_full_url(page, p["href"])
+    if new:
+        return _make_full_url(page, new[0]["href"])
+    return _make_full_url(page, after[0]["href"])
+
+
 def post_media(page, group_id, file_path, caption="", log=None):
-    """Post one media file to a group. Returns (status, message)."""
+    """Post one media file to a group.
+
+    Returns (status, message, post_url):
+      posted   - media published (post_url is the best-known permalink, or None).
+      pending  - post routed to admin approval (caller flags the group as skip).
+      failed   - an error occurred; message explains why.
+    """
     log = log or (lambda msg: print(msg))
     url = f"https://www.facebook.com/groups/{group_id}/"
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
     except Exception as e:
-        return "failed", f"could not load group page: {e}"
+        return "failed", f"could not load group page: {e}", None
+
+    # Snapshot the feed's post permalinks so we can spot the new post after
+    # publishing (Facebook inserts it into this list).
+    before = _group_post_urls(page)
 
     if not _click_composer_media(page, log):
-        return "failed", "could not find the photo/video composer"
+        return "failed", "could not find the photo/video composer", None
 
     try:
         if not _upload_file(page, file_path, log):
-            return "failed", "upload did not complete in time"
+            return "failed", "upload did not complete in time", None
         log("upload complete")
     except RuntimeError as e:
-        return "failed", str(e)
+        return "failed", str(e), None
 
     _fill_caption(page, caption)
 
     if not _click_post(page, log):
-        return "failed", "could not find the post button"
+        return "failed", "could not find the post button", None
 
     page.wait_for_timeout(4000)
     if _detect_pending(page):
-        return "pending", "post routed to admin approval"
+        return "pending", "post routed to admin approval", None
     if _detect_success(page):
-        return "posted", "published"
+        page.wait_for_timeout(3000)
+        post_url = _pick_post_url(page, before, caption)
+        return "posted", "published", post_url
     log(f"[diag] url={page.url}")
     log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
-    return "failed", "unable to confirm post outcome"
+    return "failed", "unable to confirm post outcome", None
 
 
 def _has_media_composer(page):

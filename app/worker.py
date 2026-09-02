@@ -171,6 +171,7 @@ class Worker:
         self._posted_this_run = 0
         self._pending_caption = ""  # browser-held caption for the current run
         self.blast_posted = []  # groups actually posted in the current batch cycle
+        self._last_post_url = None
 
     # ---- public API ----
     def is_busy(self):
@@ -1113,6 +1114,7 @@ class Worker:
             self._set_stage("work", f"[{i}/{len(batch_targets)}] {g.get('name') or g['id']}",
                             f"Posting to {g.get('name') or g['id']} ({i}/{len(batch_targets)})")
             status = self._post_one(g, file_path, self._pending_caption)
+            post_url = self._last_post_url
             # Only 'posted' and 'pending' (routed to admin approval) count as
             # covered this cycle. A failure stays in the pool so the next press
             # retries it instead of silently skipping a group.
@@ -1129,6 +1131,7 @@ class Worker:
                     "name": g.get("name") or g["id"],
                     "member_count": g.get("member_count") or 0,
                     "posted_at": datetime.now().isoformat(timespec="seconds"),
+                    "post_url": post_url or "",
                 })
                 try:
                     self.db.set_state("blast_result", json.dumps(self.blast_posted))
@@ -1367,8 +1370,9 @@ class Worker:
     def _post_one(self, g, file_path, caption):
         self._set_stage("publish", g.get("name") or g["id"],
                         f"Publishing to {g['name']}...")
+        post_url = None
         try:
-            status, message = post_media(
+            status, message, post_url = post_media(
                 self.browser.page, g["id"], file_path,
                 self._pending_caption if not caption else caption,
                 self._emit,
@@ -1381,11 +1385,13 @@ class Worker:
                 pass
         except Exception as e:
             status, message = "failed", str(e)
-        self.db.add_post(g["id"], g["name"], file_path, status, message)
+        self._last_post_url = post_url
+        self.db.add_post(g["id"], g["name"], file_path, status, message, post_url=post_url)
         if status == "posted":
             self.db.mark_media_used(file_path)
             self._posted_this_run += 1
-            self._emit(f"[POSTED] {g['name']} <- {os.path.basename(file_path)}")
+            link = f"  {post_url}" if post_url else ""
+            self._emit(f"[POSTED] {g['name']} <- {os.path.basename(file_path)}{link}")
         elif status == "pending":
             self.db.set_group_status(g["id"], STATUS_SKIP, "post routed to approval")
             self._emit(f"[PENDING] {g['name']} now flagged as require-approval.")

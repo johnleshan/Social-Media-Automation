@@ -872,6 +872,7 @@ function renderStepper(st) {
         <li>
           <span class="lr-list-name">${esc(g.name || g.id)}</span>
           ${g.member_count ? `<span class="lr-list-members">${esc(g.member_count.toLocaleString())} members</span>` : ""}
+          ${g.post_url ? `<a class="lr-list-link" href="${esc(g.post_url)}" target="_blank" rel="noopener">View post ↗</a>` : ""}
           <span class="lr-list-time">${esc(fmtWhen(g.posted_at))}</span>
         </li>`).join("")}
     </ul>` : "";
