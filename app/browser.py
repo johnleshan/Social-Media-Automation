@@ -212,19 +212,39 @@ def _free_port():
     return port
 
 
-def _wait_debug_endpoint(port, proc, timeout=30):
+def _wait_debug_endpoint(port, proc, timeout=12):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/json/version", timeout=2
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/json/version",
+                headers={"User-Agent": "Mozilla/5.0"}
             )
-            return True
+            with urllib.request.urlopen(req, timeout=1) as resp:
+                if resp.status == 200:
+                    return True
         except Exception:
             if proc.poll() is not None:
                 return False
-            time.sleep(0.5)
+            time.sleep(0.15)
     return False
+
+
+def _clean_stale_profile_locks(profile_dir):
+    """Remove stale lock files left behind by previous Chrome sessions."""
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"):
+        lock_file = os.path.join(profile_dir, lock_name)
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+            except Exception:
+                pass
+        default_lock = os.path.join(profile_dir, "Default", lock_name)
+        if os.path.exists(default_lock):
+            try:
+                os.remove(default_lock)
+            except Exception:
+                pass
 
 
 def launch_native_chrome(profile_dir, url, headless, log=None):
@@ -239,6 +259,12 @@ def launch_native_chrome(profile_dir, url, headless, log=None):
     """
     log = log or (lambda msg: print(msg))
     os.makedirs(profile_dir, exist_ok=True)
+
+    # Clean up any leftover processes using this profile first so Chrome doesn't
+    # delegate to an existing process and fail to bind the remote debug port.
+    _kill_chrome_on_profile(profile_dir)
+    _clean_stale_profile_locks(profile_dir)
+
     exe = _chrome_exe_path()
     if not exe:
         raise RuntimeError("Could not find Chrome or Edge on this PC.")
@@ -252,7 +278,7 @@ def launch_native_chrome(profile_dir, url, headless, log=None):
         "--disable-background-mode",
     ]
     if headless:
-        cmd.append("--headless")
+        cmd.append("--headless=new")
     cmd.append(url or "about:blank")
     log(f"Launching Chrome on profile (debug port {port})...")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -260,7 +286,7 @@ def launch_native_chrome(profile_dir, url, headless, log=None):
         try:
             subprocess.run(
                 ["taskkill", "/F", "/PID", str(proc.pid), "/T"],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=5,
             )
         except Exception:
             pass
@@ -284,14 +310,14 @@ def _close_native_chrome(proc, browser=None, user_data_dir=None):
                         pass
         except Exception:
             pass
-    deadline = time.time() + 8
+    deadline = time.time() + 4
     while time.time() < deadline and proc.poll() is None:
-        time.sleep(0.5)
+        time.sleep(0.2)
     if proc.poll() is None:
         try:
             subprocess.run(
                 ["taskkill", "/F", "/PID", str(proc.pid), "/T"],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=5,
             )
         except Exception:
             try:
@@ -318,17 +344,14 @@ def _short_path(p):
 def _kill_chrome_on_profile(profile_dir):
     """Force-kill any Chrome/Edge process launched on the given profile dir.
 
-    Only called at browser close (never on every launch). Runs under a hard
-    deadline so a wedged Chrome can never hang the caller. We first filter by
-    process name (cheap), then read the command line only of matching processes
-    to find the profile path.
+    Runs under a hard deadline so a wedged Chrome can never hang the caller.
     """
     import psutil
     long_p = os.path.normpath(profile_dir).lower()
     short_p = _short_path(long_p).lower()
     killed = 0
     this_pid = os.getpid()
-    deadline = time.time() + 8.0
+    deadline = time.time() + 4.0
     try:
         for proc in psutil.process_iter(["pid", "name"]):
             if time.time() > deadline:
@@ -396,23 +419,29 @@ class FacebookBrowser:
         self._launch_cdp(url)
         return self.page
 
-    def is_logged_in(self, timeout_ms=30000):
+    def is_logged_in(self, timeout_ms=15000):
         """True only when a real Facebook session exists (c_user cookie).
 
-        The `c_user` cookie is Facebook's definitive logged-in marker. URL
-        checks are unreliable because Facebook renders its login form at "/"
-        without redirecting.
+        The `c_user` cookie is Facebook's definitive logged-in marker.
         """
         if self.page is None:
             return False
+        try:
+            cookies = self.context.cookies()
+            if any(c["name"] == "c_user" and c.get("value") for c in cookies):
+                return True
+        except Exception:
+            pass
+
         try:
             self.page.goto(
                 "https://www.facebook.com/", wait_until="domcontentloaded",
                 timeout=timeout_ms,
             )
-            self.page.wait_for_timeout(2500)
+            self.page.wait_for_timeout(1000)
         except Exception:
-            return False
+            pass
+
         try:
             cookies = self.context.cookies()
             for c in cookies:
@@ -475,14 +504,14 @@ def open_login(user_data_dir, log=None, verify=True):
             try:
                 cookies = ctx.cookies()
                 if any(c["name"] == "c_user" and c.get("value") for c in cookies):
-                    time.sleep(5)
+                    time.sleep(3)
                     still = ctx.cookies()
                     if any(c["name"] == "c_user" and c.get("value") for c in still):
                         logged_in = True
                         break
             except Exception:
                 pass
-            time.sleep(2)
+            time.sleep(1)
         if logged_in:
             log("Facebook login detected. Saving the session.")
         else:
@@ -503,7 +532,7 @@ def open_login(user_data_dir, log=None, verify=True):
         fb = FacebookBrowser(user_data_dir, headless=True, log=log)
         try:
             fb.launch()
-            ok = fb.is_logged_in(timeout_ms=30000)
+            ok = fb.is_logged_in(timeout_ms=15000)
             log("Session verified: logged in." if ok else
                 "Session NOT logged in yet. Try the login window again.")
         except Exception as e:
