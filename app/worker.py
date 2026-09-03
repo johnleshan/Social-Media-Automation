@@ -322,6 +322,13 @@ class Worker:
                 log=self._emit,
             )
             self.browser.launch()
+            # Bound all Playwright waits so a slow/hung group page can never
+            # freeze the app (a hung Playwright call holds the GIL and stalls
+            # the HTTP server too). Explicit fails time out and get skipped.
+            try:
+                self.browser.page.set_default_timeout(15000)
+            except Exception:
+                pass
             if not self.browser.is_logged_in():
                 self._set_stage("done", "", "Not logged into Facebook.")
                 self._final_summary = "Not logged into Facebook on this profile."
@@ -991,8 +998,6 @@ class Worker:
         groups, one post per group per press, then stop. Durable resume continues
         on the next press (like auto-join resume)."""
         settings = self.config.settings
-        delay_min = max(30, int(settings.get("delay_min", 180)))
-        delay_max = max(delay_min, int(settings.get("delay_max", 480)))
         media_folder = os.path.abspath(os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             settings.get("media_folder", "content"),
@@ -1026,67 +1031,14 @@ class Worker:
             except Exception:
                 pass
 
-        # 1b. Kenya + niche + size pre-filter (in-memory on stored group names).
-        #     Off-region, mega, off-topic and unverifiable (junk-named) groups
-        #     are dropped; qualifying groups sort by niche relevance then
-        #     smallest-first (smaller = less regulated).
-        niche = bool(settings.get("niche_only", True))
-        if niche:
-            targets, dropped = self._rank_niche(targets)
-            if dropped:
-                kept_n = len(targets)
-                self._emit(
-                    f"[niche] kept {kept_n} Kenya/East-Africa niche group(s) "
-                    f"from {kept_n + dropped} joined; dropped "
-                    f"{dropped} off-region/mega/off-topic/unverifiable."
-                )
-
         batch_targets = targets[:batch]
         if not batch_targets:
-            if niche:
-                self._final_summary = (
-                    "No Kenya niche group matches your post — all your joined "
-                    "groups are mega/off-topic/unverifiable. Sync or join more "
-                    "niche groups, then press Post Batch again."
-                )
-                self._emit("No Kenya niche group to target. Sync/join niche groups first.")
-            else:
-                self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
-                self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
+            self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
+            self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
             return
 
-        # Pre-flight: only keep groups the Page can actually post to. Closed /
-        # Page-blocked groups otherwise burn a full upload + cooldown cycle, so
-        # skip them up front and count them as covered for this cycle.
+        # No pre-flight restrictions: post to all groups, only 10/cycle + no repeat.
         blocked = []
-        if bool(settings.get("postable_only", True)):
-            self._set_stage("prepare", "Filtering to Page-postable groups",
-                            "Checking which groups allow Page posts...")
-            batch_targets, blocked = self._filter_page_postable(
-                batch_targets, self._set_stage
-            )
-            for bg in blocked:
-                done.add(str(bg["id"]))
-            if blocked:
-                self._emit(
-                    f"Skipped {len(blocked)} group(s) (closed to Page posts or "
-                    "inactive) - only posting to open, active groups."
-                )
-            try:
-                self.db.set_state("blast_done", json.dumps(sorted(done)))
-            except Exception:
-                pass
-
-            if not batch_targets:
-                self._final_summary = (
-                    f"All {len(blocked)} target group(s) are closed to Page posts. "
-                    "No open group to post to this press."
-                )
-                self.db.set_state("blast_progress", json.dumps({
-                    "done": len(done), "total": len(targets_all),
-                }))
-                self._emit("No open/Page-postable group to post to this press.")
-                return
 
         self.db.set_state("blast_progress", json.dumps({
             "done": len(done), "total": len(targets_all),
@@ -1105,24 +1057,22 @@ class Worker:
             if self._stop.is_set():
                 break
 
-            file_path = self._pick_media(media_folder)
-            if not file_path:
+            file_paths = self._pick_all_media(media_folder)
+            if not file_paths:
                 self._emit("No media files found in the content folder.")
                 self._final_summary = "No media files found in the content folder."
                 break
 
             self._set_stage("work", f"[{i}/{len(batch_targets)}] {g.get('name') or g['id']}",
                             f"Posting to {g.get('name') or g['id']} ({i}/{len(batch_targets)})")
-            status = self._post_one(g, file_path, self._pending_caption)
+            status = self._post_one(g, file_paths, self._pending_caption)
             post_url = self._last_post_url
-            # Only 'posted' and 'pending' (routed to admin approval) count as
-            # covered this cycle. A failure stays in the pool so the next press
-            # retries it instead of silently skipping a group.
+            # Every attempted group is consumed for this cycle (no repeats).
+            done.add(str(g["id"]))
             if status == "posted":
                 posted_n += 1
-                done.add(str(g["id"]))
             elif status == "pending":
-                done.add(str(g["id"]))
+                pass
             else:
                 failed_n += 1
             if status in ("posted", "pending"):
@@ -1145,27 +1095,15 @@ class Worker:
                 "done": len(done), "total": len(targets_all),
             }))
 
-            if i < len(batch_targets):
-                delay = random.randint(delay_min, delay_max)
-                self._set_stage("cooldown", f"next post in {delay}s",
-                                f"Cooling down {delay // 60}m{delay % 60}s before the next post...")
-                self._emit(
-                    f"Waiting {delay // 60}m{delay % 60}s before the next post "
-                    f"(to stay under Facebook's radar)..."
-                )
-                self._wait_stop(interval=1, total=delay)
-
         skip_note = f" · {len(blocked)} skipped (closed to Pages)" if blocked else ""
         self._final_summary = (
             f"{posted_n} posted · {failed_n} failed this batch{skip_note} · "
             f"{len(done)}/{len(targets_all)} groups covered this cycle"
         )
         self._emit(
-            f"Batch finished: {posted_n} post(s) this press, "
-            f"{len(done)}/{len(targets_all)} of your groups posted this cycle"
-            f"{skip_note}. "
-            f"{failed_n} failed and will be retried next press. "
-            "Press Post Batch again to continue."
+            f"Batch finished: {posted_n} posted · {failed_n} failed this press, "
+            f"{len(done)}/{len(targets_all)} of your groups covered this cycle"
+            f"{skip_note}. Press Post Batch again to continue."
         )
         if self.notify:
             self.notify("Batch posting done",
@@ -1367,31 +1305,29 @@ class Worker:
             postable.append(g)
         return postable, blocked
 
-    def _post_one(self, g, file_path, caption):
+    def _post_one(self, g, file_paths, caption):
+        """Post one or more media files to a group. file_paths is a list."""
+        paths = file_paths if isinstance(file_paths, (list, tuple)) else [file_paths]
         self._set_stage("publish", g.get("name") or g["id"],
                         f"Publishing to {g['name']}...")
         post_url = None
         try:
             status, message, post_url = post_media(
-                self.browser.page, g["id"], file_path,
+                self.browser.page, g["id"], paths,
                 self._pending_caption if not caption else caption,
                 self._emit,
             )
-            try:
-                info = extract_group_info_from_page(self.browser.page)
-                if info.get("name") or info.get("member_count"):
-                    self.db.upsert_group(g["id"], name=info.get("name"), member_count=info.get("member_count"))
-            except Exception:
-                pass
         except Exception as e:
             status, message = "failed", str(e)
         self._last_post_url = post_url
-        self.db.add_post(g["id"], g["name"], file_path, status, message, post_url=post_url)
+        files_label = " + ".join(os.path.basename(p) for p in paths)
+        self.db.add_post(g["id"], g["name"], files_label, status, message, post_url=post_url)
         if status == "posted":
-            self.db.mark_media_used(file_path)
+            for fp in paths:
+                self.db.mark_media_used(fp)
             self._posted_this_run += 1
             link = f"  {post_url}" if post_url else ""
-            self._emit(f"[POSTED] {g['name']} <- {os.path.basename(file_path)}{link}")
+            self._emit(f"[POSTED] {g['name']} <- {files_label}{link}")
         elif status == "pending":
             self.db.set_group_status(g["id"], STATUS_SKIP, "post routed to approval")
             self._emit(f"[PENDING] {g['name']} now flagged as require-approval.")
@@ -1419,6 +1355,48 @@ class Worker:
         if oldest and os.path.exists(oldest):
             return oldest
         return files[0]
+
+    def _pick_all_media(self, folder):
+        """Return one image + one video from the folder (or whatever is
+        available). Rotates which video is picked based on media_used so
+        each post gets a different combination."""
+        images = []
+        videos = []
+        if os.path.isdir(folder):
+            for root, _dirs, names in os.walk(folder):
+                for name in names:
+                    full = os.path.join(root, name)
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in IMAGE_EXTS:
+                        images.append(full)
+                    elif ext in VIDEO_EXTS:
+                        videos.append(full)
+        images.sort()
+        videos.sort()
+        if not images and not videos:
+            return []
+        # Pick one image (first/only).
+        picked_img = images[0] if images else None
+        # Pick one video, rotating based on last-used.
+        picked_vid = None
+        if videos:
+            usage = {r["file_path"]: r["last_used_at"]
+                     for r in self.db.conn.execute(
+                         "SELECT file_path, last_used_at FROM media_used").fetchall()}
+            unused_vids = [v for v in videos if v not in usage]
+            if unused_vids:
+                picked_vid = unused_vids[0]
+            else:
+                # All used — pick the one used longest ago.
+                oldest = self.db.oldest_used_media()
+                for v in videos:
+                    if v == oldest:
+                        picked_vid = v
+                        break
+                if not picked_vid:
+                    picked_vid = videos[0]
+        result = [p for p in (picked_img, picked_vid) if p]
+        return result if result else []
 
     def _reached_cap(self, today, soft_cap):
         if not soft_cap:

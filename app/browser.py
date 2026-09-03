@@ -318,29 +318,45 @@ def _short_path(p):
 def _kill_chrome_on_profile(profile_dir):
     """Force-kill any Chrome/Edge process launched on the given profile dir.
 
-    Chrome records the profile path in command lines using long or short (8.3)
-    path forms, so both are matched.
+    Only called at browser close (never on every launch). Runs under a hard
+    deadline so a wedged Chrome can never hang the caller. We first filter by
+    process name (cheap), then read the command line only of matching processes
+    to find the profile path.
     """
-    long_p = os.path.normpath(profile_dir)
-    short_p = _short_path(long_p)
-    script = (
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" "
-        "| Where-Object { $_.CommandLine -and "
-        "($_.CommandLine.Contains('" + long_p + "') -or "
-        "$_.CommandLine.Contains('" + short_p + "')) } "
-        "| ForEach-Object { $_.ProcessId }"
-    )
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, timeout=30,
-    ).stdout
-    for line in out.splitlines():
-        pid = line.strip()
-        if pid.isdigit():
+    import psutil
+    long_p = os.path.normpath(profile_dir).lower()
+    short_p = _short_path(long_p).lower()
+    killed = 0
+    this_pid = os.getpid()
+    deadline = time.time() + 8.0
+    try:
+        for proc in psutil.process_iter(["pid", "name"]):
+            if time.time() > deadline:
+                break
             try:
-                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=10)
+                if proc.info.get("pid") == this_pid:
+                    continue
+                if (proc.info.get("name") or "").lower() not in ("chrome.exe", "msedge.exe"):
+                    continue
+                try:
+                    plist = proc.cmdline() or []
+                except Exception:
+                    continue
+                cmd = " ".join(plist).lower()
+                if long_p in cmd or short_p in cmd:
+                    try:
+                        proc.kill()
+                        killed += 1
+                    except Exception:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
             except Exception:
-                pass
+                continue
+    except Exception:
+        pass
+    return killed
 
 
 class FacebookBrowser:
