@@ -508,4 +508,665 @@ class Worker:
             self._emit("No groups to join — run a group scan first.")
             return
 
-        SKIP_STATES = (JOIN_JOINED
+        SKIP_STATES = (JOIN_JOINED, JOIN_PENDING, JOIN_DECLINED, "unviewable")
+        targets_all = [g for g in targets_all if g.get("join_status") not in SKIP_STATES]
+        if not targets_all:
+            self._emit("No joinable groups left (all are already joined, pending, declined, or unavailable).")
+            return
+
+        done = set()
+        try:
+            raw = self.db.get_state("join_done", "") or ""
+            done = set(json.loads(raw)) if raw else set()
+        except Exception:
+            done = set()
+        targets = [g for g in targets_all if str(g["id"]) not in done]
+        if targets_all and not targets:
+            self._emit(
+                f"All {len(done)} previously processed group(s) are done — "
+                "starting a fresh pass."
+            )
+            done = set()
+            targets = list(targets_all)
+        elif done:
+            self._emit(
+                f"Resuming: skipping {len(done)} already-processed group(s), "
+                f"{len(targets)} left to try."
+            )
+        try:
+            self.db.set_state("join_done", json.dumps(sorted(done)))
+        except Exception:
+            pass
+
+        settings = self.config.settings
+        if bool(settings.get("developer_mode", False)):
+            HARD_JOIN_CAP = 1_000_000
+            self._emit("Developer mode ON: daily join cap disabled.")
+        else:
+            HARD_JOIN_CAP = 10
+
+        jd_min = max(15, int(settings.get("join_delay_min", 30)))
+        jd_max = max(jd_min, int(settings.get("join_delay_max", 90)))
+
+        already_joined_today = self.db.joins_today()
+        if already_joined_today >= HARD_JOIN_CAP:
+            self.db.set_state("hard_stop", json.dumps({
+                "triggered_at": datetime.now().isoformat(timespec="seconds"),
+                "joined": already_joined_today,
+                "cap": HARD_JOIN_CAP,
+                "reason": "start",
+                "message": (
+                    f"You joined {already_joined_today} groups today — that is the "
+                    "full safe daily limit. The app stopped before joining any more "
+                    "so Facebook cannot flag your account for 'joining groups too fast'."
+                ),
+            }))
+            self._emit("HARD STOP — DAILY JOIN CAP REACHED.")
+            self._final_summary = (
+                f"HARD STOP: daily join cap reached ({already_joined_today}/{HARD_JOIN_CAP}). "
+                "Resume tomorrow to continue."
+            )
+            return
+
+        remaining_today = HARD_JOIN_CAP - already_joined_today
+        try:
+            self.db.set_state("hard_stop", "")
+        except Exception:
+            pass
+
+        self._emit(
+            f"Auto-join: {len(targets)} group(s) queued, "
+            f"{remaining_today} of {HARD_JOIN_CAP} safe join slots left today, "
+            f"{jd_min}-{jd_max}s random pauses."
+        )
+        self.db.set_state("join_progress", json.dumps({"done": 0, "total": len(targets)}))
+        self._set_stage("prepare", f"{len(targets)} group(s) queued",
+                        f"Auto-joining {len(targets)} group(s)...")
+
+        joined_n = pending_n = member_n = failed_n = 0
+        run_count = 0
+        for i, g in enumerate(targets, 1):
+            if self._stop.is_set():
+                break
+            while self._pause.is_set() and not self._stop.is_set():
+                time.sleep(0.2)
+            if self._stop.is_set():
+                break
+
+            live_today = self.db.joins_today()
+            if live_today >= HARD_JOIN_CAP:
+                self.db.set_state("hard_stop", json.dumps({
+                    "triggered_at": datetime.now().isoformat(timespec="seconds"),
+                    "joined": live_today,
+                    "cap": HARD_JOIN_CAP,
+                    "reason": "limit",
+                    "message": (
+                        f"You reached the safe daily limit of {HARD_JOIN_CAP} group "
+                        f"joins today ({live_today} so far)."
+                    ),
+                }))
+                self._emit(f"HARD STOP — DAILY JOIN CAP REACHED ({live_today}/{HARD_JOIN_CAP}).")
+                self._final_summary = (
+                    f"HARD STOP: daily cap reached ({live_today}/{HARD_JOIN_CAP}). "
+                    "Resume tomorrow to continue."
+                )
+                break
+
+            name = g.get("name") or g["id"]
+            self._set_stage("work", f"[{i}/{len(targets)}] {name}",
+                            f"Visiting & joining: {name} ({i}/{len(targets)})")
+            try:
+                result, detail = join_group(self.browser.page, g["id"], self._emit)
+            except Exception as e:
+                result, detail = "failed", str(e)
+
+            if result in ("joined", "pending", "already_member"):
+                done.add(str(g["id"]))
+                try:
+                    self.db.set_state("join_done", json.dumps(sorted(done)))
+                except Exception:
+                    pass
+                js = "joined" if result in ("joined", "already_member") else "pending"
+                self.db.set_join_status(g["id"], js)
+                if result in ("joined", "pending"):
+                    self.db.record_join(g["id"], result)
+                    run_count += 1
+                if result == "joined":
+                    joined_n += 1
+                elif result == "pending":
+                    pending_n += 1
+                else:
+                    member_n += 1
+                self._set_stage("classify", f"[{i}/{len(targets)}] {name}",
+                                f"Classifying: {name} ({i}/{len(targets)})")
+                status, signal = check_group(
+                    self.browser.page, g["id"], self._emit, goto=False
+                )
+                self.db.set_group_status(g["id"], status, signal)
+                self._emit(
+                    f"[join {i}/{len(targets)}] {name} -> {detail}; "
+                    f"joined={js}, classified {status} ({signal})"
+                )
+            else:
+                failed_n += 1
+                self._emit(f"[join {i}/{len(targets)}] {name} -> {result} ({detail})")
+                if result in ("unviewable", "no_button"):
+                    self.db.set_join_status(g["id"], result)
+                    done.add(str(g["id"]))
+                    try:
+                        self.db.set_state("join_done", json.dumps(sorted(done)))
+                    except Exception:
+                        pass
+
+            if run_count >= HARD_JOIN_CAP:
+                self._emit(f"HARD STOP — DAILY JOIN CAP REACHED ({run_count}/{HARD_JOIN_CAP}).")
+                self._final_summary = (
+                    f"HARD STOP: daily cap reached ({run_count}/{HARD_JOIN_CAP}). "
+                    "Resume tomorrow to continue."
+                )
+                break
+
+            self.db.set_state(
+                "join_progress", json.dumps({"done": i, "total": len(targets)})
+            )
+            self._page_wait(random.randint(jd_min * 1000, jd_max * 1000))
+
+        safe = self.db.count_groups(STATUS_SAFE)
+        skip = self.db.count_groups(STATUS_SKIP)
+        unknown = self.db.count_groups(STATUS_UNKNOWN)
+        total_today = self.db.joins_today()
+        self._final_summary = (
+            f"{joined_n} joined · {pending_n} pending · "
+            f"{member_n} already members · {failed_n} failed · "
+            f"{total_today} total joins today"
+        )
+        self._emit(
+            f"Join summary: {joined_n} joined, {pending_n} pending approval, "
+            f"{member_n} already members, {failed_n} not joinable."
+        )
+        if self.notify:
+            self.notify("Auto-Join finished", f"{joined_n} joined, {pending_n} pending, {failed_n} failed")
+
+    # ---- join-status check ----
+    def _check_join_status(self):
+        """Visit each discovered group and check whether we are a member."""
+        rows = self.db.get_groups()
+        if not rows:
+            self._emit("No groups to check — run a scan first.")
+            return
+
+        targets = [
+            g for g in rows
+            if g["join_status"] in (JOIN_NOT_JOINED, JOIN_PENDING)
+            or g["join_status"] not in ("joined", "declined", "unviewable")
+        ]
+        if not targets:
+            self._emit("All groups already have a confirmed join status.")
+            return
+
+        check_pause_min = 100
+        check_pause_max = 300
+        self._emit(f"Checking join status: {len(targets)} group(s).")
+        self.db.set_state("join_progress", json.dumps({"done": 0, "total": len(targets)}))
+        self._set_stage("prepare", f"{len(targets)} group(s) queued",
+                        f"Checking join status for {len(targets)} group(s)...")
+
+        joined_n = pending_n = declined_n = unknown_n = 0
+        for i, g in enumerate(targets, 1):
+            if self._stop.is_set():
+                break
+            while self._pause.is_set() and not self._stop.is_set():
+                time.sleep(0.2)
+            if self._stop.is_set():
+                break
+            name = g.get("name") or g["id"]
+            self._set_stage("work", f"[{i}/{len(targets)}] {name}",
+                            f"Checking: {name} ({i}/{len(targets)})")
+            try:
+                join_status, detail = check_membership_status(
+                    self.browser.page, g["id"], self._emit
+                )
+                info = extract_group_info_from_page(self.browser.page)
+                if info.get("name") or info.get("member_count"):
+                    self.db.upsert_group(g["id"], name=info.get("name"), member_count=info.get("member_count"))
+                    if info.get("name"):
+                        name = info.get("name")
+            except Exception as e:
+                join_status, detail = "unknown", str(e)
+
+            self.db.set_join_status(g["id"], join_status)
+            if join_status == "joined":
+                joined_n += 1
+            elif join_status == "pending":
+                pending_n += 1
+            elif join_status == "declined":
+                declined_n += 1
+            else:
+                unknown_n += 1
+            self._emit(
+                f"[check {i}/{len(targets)}] {name} -> {join_status} ({detail})"
+            )
+
+            self.db.set_state(
+                "join_progress", json.dumps({"done": i, "total": len(targets)})
+            )
+            self._page_wait(random.randint(check_pause_min, check_pause_max))
+
+        self._final_summary = (
+            f"{joined_n} joined · {pending_n} pending · "
+            f"{declined_n} declined · {unknown_n} uncheckable"
+        )
+        if self.notify:
+            self.notify(
+                "Join-status check done",
+                f"{joined_n} joined, {pending_n} pending, {declined_n} declined"
+            )
+
+    # ---- sync my groups (Option A) ----
+    def _sync_my_groups(self):
+        self._set_stage("sync", "Reading your Groups feed",
+                        "Syncing your full Facebook groups list...")
+        dev = bool(self.config.settings.get("developer_mode", False))
+        self._emit("Syncing your full Facebook groups list from your Groups feed...")
+        try:
+            mine = list_my_groups(
+                self.browser.page, self._emit,
+                max_scrolls=500 if dev else 100,
+                no_early_stop=dev,
+                should_stop=lambda: self._stop.is_set(),
+                should_pause=self._pause.is_set,
+            )
+        except Exception as e:
+            self._final_summary = f"Sync failed: {e}"
+            self._emit(f"Sync failed: {e}")
+            return
+        for g in mine:
+            member_count = g.get("member_count") or 0
+            if not member_count:
+                existing = self.db.get_group(g["id"])
+                if existing and existing["member_count"]:
+                    member_count = existing["member_count"]
+                g["member_count"] = member_count
+            self.db.upsert_group(
+                g["id"], g["name"], member_count or None, g["url"]
+            )
+            self.db.set_join_status(g["id"], JOIN_JOINED)
+
+        zero_groups = [g for g in mine if not g.get("member_count")]
+        if zero_groups:
+            self._emit(f"Enriching member counts for {len(zero_groups)} group(s)...")
+            for idx, g in enumerate(zero_groups, 1):
+                if self._stop.is_set():
+                    break
+                name_disp = g.get("name") or g["id"]
+                self._set_stage("sync", f"[{idx}/{len(zero_groups)}] {name_disp}",
+                                f"Checking member count: {name_disp} ({idx}/{len(zero_groups)})")
+                try:
+                    url = g.get("url") or f"https://www.facebook.com/groups/{g['id']}/"
+                    self.browser.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    self.browser.page.wait_for_timeout(1500)
+                    final_url = self.browser.page.url or ""
+                    info = extract_group_info_from_page(self.browser.page)
+                    new_mc = info.get("member_count") or 0
+                    new_name = info.get("name") or ""
+
+                    landed_on_group = _looks_like_group_page(final_url, str(g["id"]))
+                    if not landed_on_group or _is_generic_title(new_name):
+                        if new_mc:
+                            g["member_count"] = new_mc if landed_on_group else 0
+                        continue
+
+                    if new_mc:
+                        g["member_count"] = new_mc
+                    if new_name and (not g.get("name") or g.get("name") == g.get("id")):
+                        g["name"] = new_name
+                    self.db.upsert_group(g["id"], name=(
+                        new_name or g.get("name")), member_count=new_mc or None)
+                except Exception as ex:
+                    pass
+                if not self._stop.is_set():
+                    self._page_wait(800)
+
+        self.db.set_state("sync_result", json.dumps({
+            "found": len(mine),
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "groups": [{"id": g["id"], "name": g["name"], "member_count": g.get("member_count")}
+                       for g in mine],
+        }))
+        self._final_summary = f"{len(mine)} group(s) synced from your Facebook account."
+        self._emit(f"Synced {len(mine)} group(s) — all are treated as confirmed memberships.")
+        if self.notify:
+            self.notify("Groups synced", f"{len(mine)} of your groups found")
+
+    # ---- batch post to all my groups ----
+    def _blast_groups(self):
+        settings = self.config.settings
+        media_folder = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            settings.get("media_folder", "content"),
+        ))
+        try:
+            batch = max(1, int(self.db.get_state("blast_batch", "10") or 10))
+        except Exception:
+            batch = 10
+
+        done = set()
+        try:
+            raw = self.db.get_state("blast_done", "") or ""
+            done = set(json.loads(raw)) if raw else set()
+        except Exception:
+            done = set()
+        targets_all = self.db.get_groups_by_join_status(JOIN_JOINED)
+        targets = [g for g in targets_all if str(g["id"]) not in done]
+        if targets_all and not targets:
+            self._emit(
+                f"All {len(done)} of your groups already posted this cycle — "
+                "starting a fresh pass."
+            )
+            done = set()
+            targets = list(targets_all)
+            self.blast_posted = []
+            try:
+                self.db.set_state("blast_result", json.dumps([]))
+            except Exception:
+                pass
+
+        batch_targets = targets[:batch]
+        if not batch_targets:
+            self._final_summary = "No un-posted groups to target — run sync or finish the current cycle."
+            self._emit("No un-posted groups to target. Sync your groups and press Post Batch again.")
+            return
+
+        self.db.set_state("blast_progress", json.dumps({
+            "done": len(done), "total": len(targets_all),
+        }))
+        self._set_stage("prepare",
+                        f"{len(batch_targets)} group(s) in this batch "
+                        f"({len(done)}/{len(targets_all)} done this cycle)",
+                        f"Posting to {len(batch_targets)} group(s) this press...")
+
+        posted_n = failed_n = 0
+        for i, g in enumerate(batch_targets, 1):
+            if self._stop.is_set():
+                break
+            while self._pause.is_set() and not self._stop.is_set():
+                time.sleep(0.2)
+            if self._stop.is_set():
+                break
+
+            file_paths = self._pick_all_media(media_folder)
+            if not file_paths:
+                self._emit("No media files found in the content folder.")
+                self._final_summary = "No media files found in the content folder."
+                break
+
+            self._set_stage("work", f"[{i}/{len(batch_targets)}] {g.get('name') or g['id']}",
+                            f"Posting to {g.get('name') or g['id']} ({i}/{len(batch_targets)})")
+            status = self._post_one(g, file_paths, self._pending_caption)
+            post_url = self._last_post_url
+            done.add(str(g["id"]))
+            if status == "posted":
+                posted_n += 1
+            elif status == "pending":
+                pass
+            else:
+                failed_n += 1
+            if status in ("posted", "pending"):
+                self.blast_posted.append({
+                    "id": str(g["id"]),
+                    "name": g.get("name") or g["id"],
+                    "member_count": g.get("member_count") or 0,
+                    "posted_at": datetime.now().isoformat(timespec="seconds"),
+                    "post_url": post_url or "",
+                })
+                try:
+                    self.db.set_state("blast_result", json.dumps(self.blast_posted))
+                except Exception:
+                    pass
+            try:
+                self.db.set_state("blast_done", json.dumps(sorted(done)))
+            except Exception:
+                pass
+            self.db.set_state("blast_progress", json.dumps({
+                "done": len(done), "total": len(targets_all),
+            }))
+
+        self._final_summary = (
+            f"{posted_n} posted · {failed_n} failed this batch · "
+            f"{len(done)}/{len(targets_all)} groups covered this cycle"
+        )
+        self._emit(
+            f"Batch finished: {posted_n} posted · {failed_n} failed this press, "
+            f"{len(done)}/{len(targets_all)} of your groups covered this cycle."
+        )
+        if self.notify:
+            self.notify("Batch posting done",
+                        f"{posted_n} posted · {failed_n} failed · "
+                        f"{len(done)}/{len(targets_all)} groups this cycle")
+
+    # ---- page post ----
+    def _page_post(self, page_url):
+        settings = self.config.settings
+        media_folder = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            settings.get("media_folder", "content"),
+        ))
+        file_path = None
+        want = getattr(self, "_page_file_override", "") or ""
+        if want:
+            cand = os.path.join(media_folder, want)
+            if os.path.isfile(cand):
+                file_path = cand
+        if not file_path:
+            file_path = self._pick_media(media_folder)
+        if not file_path:
+            self._final_summary = "No media files found in the content folder."
+            self._emit("No media files found in the content folder.")
+            return
+
+        self._set_stage("work", f"Posting {os.path.basename(file_path)} to page",
+                        "Posting to your Page...")
+        self._emit(f"Posting {os.path.basename(file_path)} to the Page...")
+        try:
+            status, msg = post_media_to_page(
+                self.browser.page, file_path, page_url,
+                caption=self._pending_caption, log=self._emit,
+            )
+        except Exception as e:
+            status, msg = "failed", str(e)
+
+        self._emit(f"Page post result: {status} — {msg}")
+        self._final_summary = f"Page post: {status} — {msg}"
+        if self.notify:
+            self.notify("Page post", f"{status}: {msg}")
+
+    # ---- posting loop ----
+    def _posting_loop(self, caption):
+        settings = self.config.settings
+        delay_min = max(30, int(settings.get("delay_min", 180)))
+        delay_max = max(delay_min, int(settings.get("delay_max", 480)))
+        dev = bool(settings.get("developer_mode", False))
+        soft_cap = 0 if dev else int(settings.get("soft_cap", 150))
+        max_cycle = int(settings.get("max_cycle_posts", 0))
+        media_folder = settings.get("media_folder", "content")
+        media_folder = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), media_folder
+        ))
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        cycle_count = 0
+        while not self._stop.is_set():
+            if self._checkpointed():
+                self._emit(
+                    "Facebook checkpoint detected. Resolve it in the browser, "
+                    "then I will continue."
+                )
+                self._wait_stop(interval=10)
+                continue
+
+            if self._reached_cap(today, soft_cap):
+                self._emit(
+                    f"Daily soft cap reached ({soft_cap}). Waiting until you Stop."
+                )
+                self._wait_stop(interval=30)
+                continue
+
+            queue = self.db.get_groups(STATUS_SAFE)
+            if not queue:
+                self._emit("No safe groups available. Waiting for Stop or a new scan.")
+                self._wait_stop(interval=30)
+                continue
+
+            if max_cycle and cycle_count >= max_cycle:
+                self._emit(f"Max posts this cycle reached ({max_cycle}). Waiting.")
+                self._wait_stop(interval=30)
+                cycle_count = 0
+                continue
+
+            for g in queue:
+                if self._stop.is_set():
+                    break
+                while self._pause.is_set() and not self._stop.is_set():
+                    time.sleep(0.2)
+                if self._stop.is_set():
+                    break
+                self._set_stage("pick", f"{len(queue)} safe group(s)",
+                                f"Picking next post from {g['name']}...")
+                file_path = self._pick_media(media_folder)
+                if not file_path:
+                    self._emit("No media files found in the content folder.")
+                    self._wait_stop(interval=30)
+                    break
+                self._post_one(g, file_path, caption)
+                cycle_count += 1
+                if self._stop.is_set():
+                    break
+                delay = random.randint(delay_min, delay_max)
+                self._set_stage("cooldown", f"next post in {delay}s",
+                                f"Cooling down {delay // 60}m{delay % 60}s before the next post...")
+                self._emit(f"Waiting {delay // 60}m{delay % 60}s before the next post...")
+                self._wait_stop(interval=1, total=delay)
+
+        self._final_summary = f"{self._posted_this_run} post(s) published this run."
+        if self.notify:
+            self.notify("Posting stopped", f"{self._posted_this_run} posted this run")
+
+    def _post_one(self, g, file_paths, caption):
+        """Post one or more media files to a group. file_paths is a list."""
+        paths = file_paths if isinstance(file_paths, (list, tuple)) else [file_paths]
+        self._set_stage("publish", g.get("name") or g["id"],
+                        f"Publishing to {g['name']}...")
+        post_url = None
+        try:
+            status, message, post_url = post_media(
+                self.browser.page, g["id"], paths,
+                self._pending_caption if not caption else caption,
+                self._emit,
+            )
+        except Exception as e:
+            status, message = "failed", str(e)
+        self._last_post_url = post_url
+        files_label = " + ".join(os.path.basename(p) for p in paths)
+        self.db.add_post(g["id"], g["name"], files_label, status, message, post_url=post_url)
+        if status == "posted":
+            for fp in paths:
+                self.db.mark_media_used(fp)
+            self._posted_this_run += 1
+            link = f"  {post_url}" if post_url else ""
+            self._emit(f"[POSTED] {g['name']} <- {files_label}{link}")
+        elif status == "pending":
+            self.db.set_group_status(g["id"], STATUS_SKIP, "post routed to approval")
+            self._emit(f"[PENDING] {g['name']} now flagged as require-approval.")
+        else:
+            self._emit(f"[FAILED] {g['name']}: {message}")
+        return status
+
+    def _pick_media(self, folder):
+        files = []
+        if os.path.isdir(folder):
+            for root, _dirs, names in os.walk(folder):
+                for name in names:
+                    if os.path.splitext(name)[1].lower() in MEDIA_EXTS:
+                        files.append(os.path.join(root, name))
+        if not files:
+            return None
+        files.sort()
+        usage = {r["file_path"]: r["last_used_at"]
+                 for r in self.db.conn.execute(
+                     "SELECT file_path, last_used_at FROM media_used").fetchall()}
+        unused = [f for f in files if f not in usage]
+        if unused:
+            return unused[0]
+        oldest = self.db.oldest_used_media()
+        if oldest and os.path.exists(oldest):
+            return oldest
+        return files[0]
+
+    def _pick_all_media(self, folder):
+        images = []
+        videos = []
+        if os.path.isdir(folder):
+            for root, _dirs, names in os.walk(folder):
+                for name in names:
+                    full = os.path.join(root, name)
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in IMAGE_EXTS:
+                        images.append(full)
+                    elif ext in VIDEO_EXTS:
+                        videos.append(full)
+        images.sort()
+        videos.sort()
+        if not images and not videos:
+            return []
+        picked_img = images[0] if images else None
+        picked_vid = None
+        if videos:
+            usage = {r["file_path"]: r["last_used_at"]
+                     for r in self.db.conn.execute(
+                         "SELECT file_path, last_used_at FROM media_used").fetchall()}
+            unused_vids = [v for v in videos if v not in usage]
+            if unused_vids:
+                picked_vid = unused_vids[0]
+            else:
+                oldest = self.db.oldest_used_media()
+                for v in videos:
+                    if v == oldest:
+                        picked_vid = v
+                        break
+                if not picked_vid:
+                    picked_vid = videos[0]
+        result = [p for p in (picked_img, picked_vid) if p]
+        return result if result else []
+
+    def _reached_cap(self, today, soft_cap):
+        if not soft_cap:
+            return False
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) FROM posts WHERE status='posted' AND created_at LIKE ?",
+            (f"{today}%",),
+        ).fetchone()
+        return row[0] >= soft_cap
+
+    def _checkpointed(self):
+        try:
+            if not self.browser or not self.browser.page:
+                return False
+            url = self.browser.page.url
+            if "checkpoint" in url.lower():
+                return True
+            body = self.browser.page.inner_text("body")[:4000].lower()
+            return any(p in body for p in CHECKPOINT_PHRASES)
+        except Exception:
+            return False
+
+    def _wait_stop(self, interval=1, total=None):
+        deadline = time.time() + total if total else None
+        while not self._stop.is_set():
+            while self._pause.is_set() and not self._stop.is_set():
+                time.sleep(0.2)
+            if self._stop.is_set():
+                return
+            remaining = (deadline - time.time()) if deadline else float(interval)
+            if remaining <= 0:
+                return
+            time.sleep(min(0.5, remaining))
