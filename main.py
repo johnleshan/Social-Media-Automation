@@ -119,7 +119,10 @@ def main():
     elif _is_child():
         from app.webserver import run_web_ui
         _spawn_parent_watchdog()
-        run_web_ui()
+        # Never auto-open the browser from the child: webbrowser.open() inside
+        # the process that hosts the Playwright worker natively crashes. The URL
+        # is printed and the user opens it manually (opt-in via GPA_OPEN_BROWSER=1).
+        run_web_ui(open_browser=False)
     else:
         run_supervisor()
 

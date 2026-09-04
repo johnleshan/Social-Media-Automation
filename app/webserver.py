@@ -12,7 +12,6 @@ thread exactly as before. This module only:
     frontend can surface every failure mode clearly (missing profile, not
     logged in, import running/failed, login window open, ...).
 """
-import faulthandler
 import html
 import itertools
 import json
@@ -21,7 +20,6 @@ import string
 import subprocess
 import sys
 import threading
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -1119,18 +1117,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"ok": False, "error": str(e)})
 
 
-def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
-    """Start the local server and (optionally) open the browser to the UI."""
-    # If the worker ever wedges (e.g. a Playwright C call holds the GIL), the
-    # whole process can stop answering HTTP. Dump all thread stacks to a file
-    # every few seconds so we can see where it got stuck instead of guessing.
+def _open_browser_out_of_process(url):
+    """Open the URL in a short-lived helper process instead of this one.
+
+    webbrowser.open() must never run in the same process that hosts the
+    Playwright worker: doing so natively crashes (0xc0000005) a few seconds
+    later. Spawning a fresh interpreter that just opens the URL and exits keeps
+    the convenience without the crash.
+    """
     try:
-        dump_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "..", "data", "stack_dump.log")
-        dump_path = os.path.normpath(dump_path)
-        faulthandler.dump_traceback_later(3.0, repeat=True, file=open(dump_path, "w", encoding="utf-8"))
+        root = os.path.dirname(os.path.abspath(__file__))
+        code = "import webbrowser,time; webbrowser.open(%r,new=1); time.sleep(1.5)" % url
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            cwd=os.path.dirname(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception:
         pass
+
+
+def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
+    """Start the local server and (optionally) open the browser to the UI.
+
+    The auto browser-open is HARD-gated behind GPA_OPEN_BROWSER=1: calling
+    webbrowser.open() from this same process that also hosts the Playwright
+    worker reliably triggers a native 0xc0000005 crash in python312.dll a few
+    seconds later (the very crash that used to leave the UI on 'Server offline'
+    and make the supervisor restart forever). So the browser is only opened when
+    the user explicitly opts in, never by default."""
     state = AutomationState()
     # A previously crashed run can leave an automation Chrome still holding a
     # profile lock, which makes the next launch take forever (Chrome delegates
@@ -1162,10 +1178,13 @@ def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
         print("=" * 62)
         print("  Group Post Automator  -  local web UI")
         print(f"  {url}")
-        print("  Close this window or press Ctrl+C to quit.")
+        print("  Open the URL above in your browser, or press Ctrl+C to quit.")
         print("=" * 62)
-    if open_browser:
-        threading.Timer(0.6, lambda: webbrowser.open(url, new=1)).start()
+    # Auto-open is opt-in (GPA_OPEN_BROWSER=1) and is performed from a fresh,
+    # short-lived process so webbrowser.open never runs inside this process that
+    # also hosts the Playwright worker (that combination natively crashes).
+    if open_browser and os.environ.get("GPA_OPEN_BROWSER") == "1":
+        _open_browser_out_of_process(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
