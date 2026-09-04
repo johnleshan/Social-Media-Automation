@@ -760,6 +760,7 @@ function renderTabs() {
   });
 
   if (state.activeTab === "history") loadHistory();
+  if (state.activeTab === "posts") loadPosts();
 
   // keep the "Post" page scrape results fresh
   renderSync();
@@ -1607,6 +1608,81 @@ async function loadHistory() {
   }
 }
 
+/* ---------------- posts management ---------------- */
+const POST_STATUS_LABELS = {
+  posted: "Posted",
+  pending: "Pending",
+  failed: "Failed",
+  error: "Error",
+  draft: "Un-posted",
+};
+let lastPostPosts = [];
+
+async function loadPosts() {
+  const body = $("#postsBody");
+  try {
+    const r = await api("/api/posts?limit=200");
+    lastPostPosts = (r && r.posts) || [];
+    const rows = lastPostPosts;
+    const sub = $("#postsSub");
+    if (sub) sub.textContent = rows.length
+      ? `${rows.length} post record(s) — newest first.`
+      : "Every local record of a post the app made.";
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="7" class="empty-cell">No posts recorded yet. Post to groups to see them here.</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map((p) => {
+      const priv = esc((p.file_path || "").split(/[\\/]/).pop() || "—");
+      const gname = esc(p.group_name || p.group_id || "Unknown group");
+      const status = p.status || "unknown";
+      const stLabel = POST_STATUS_LABELS[status] || status;
+      const stClass = status === "posted" ? "ok"
+        : status === "failed" || status === "error" ? "bad"
+        : status === "pending" ? "warn" : "muted";
+      const url = p.post_url || "";
+      const link = url
+        ? `<a class="lr-list-link" href="${esc(url)}" target="_blank" rel="noopener">Open ↗</a>`
+        : `<span class="gid">no link</span>`;
+      const canToggle = (status === "posted") ? "mark un-posted" : "mark posted";
+      return `<tr>
+        <td class="mono">#${p.id}</td>
+        <td class="mono">${esc(fmtWhen(p.created_at))}</td>
+        <td title="${esc(p.group_id || "")}">${gname}</td>
+        <td>${priv}</td>
+        <td><span class="join-badge ${stClass}">${esc(stLabel)}</span></td>
+        <td>${link}</td>
+        <td>
+          <button class="btn ghost small" data-post-set="${p.id}" title="Toggle posted/un-posted record used by today's counter">${canToggle}</button>
+          <button class="btn ghost small danger" data-post-del="${p.id}" title="Remove this post record">Remove</button>
+        </td>
+      </tr>`;
+    }).join("");
+    $$("#postsBody [data-post-del]").forEach((b) =>
+      b.addEventListener("click", () => deletePost(Number(b.dataset.postDel))));
+    $$("#postsBody [data-post-set]").forEach((b) =>
+      b.addEventListener("click", () => setPostStatus(Number(b.dataset.postSet), b)));
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" class="empty-cell">Could not load posts: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function deletePost(postId) {
+  if (!confirm(`Remove post record #${postId}? This only edits local history — it will not delete the post from Facebook.`)) return;
+  const r = await api("/api/post/delete", { method: "POST", body: { id: postId } });
+  if (r && r.ok) { await loadPosts(); await loadState(); }
+  else alert((r && r.error) || "Could not remove post.");
+}
+
+async function setPostStatus(postId, btn) {
+  const p = lastPostPosts.find((x) => x.id === postId);
+  if (!p) return;
+  const to = (p.status === "posted") ? "draft" : "posted";
+  const r = await api("/api/post/update", { method: "POST", body: { id: postId, status: to } });
+  if (r && r.ok) { await loadPosts(); await loadState(); }
+  else alert((r && r.error) || "Could not update post.");
+}
+
 /* ---------------- sidebar ---------------- */
 function toggleSidebar() {
   const sb = $("#sidebar");
@@ -1727,6 +1803,7 @@ function bind() {
 
   $("#btnRefreshGroups").addEventListener("click", () => { groupsCache = {}; loadGroups(state.groupStatus, true); });
   $("#btnRefreshHistory")?.addEventListener("click", loadHistory);
+  $("#btnRefreshPosts")?.addEventListener("click", loadPosts);
   $$("#groupTabs .tab").forEach((t) => t.addEventListener("click", () => switchGroupTab(t.dataset.status)));
 
   // main tab navigation (sidebar nav)

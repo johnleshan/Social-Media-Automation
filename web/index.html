@@ -54,6 +54,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
         <span class="tab-label">History</span>
       </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="posts" id="tabPosts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8z"/><path d="M15 3v4a2 2 0 0 0 2 2h4"/></svg>
+        <span class="tab-label">Posts</span>
+      </button>
     </nav>
 
     <div class="sidebar-foot">
@@ -580,9 +584,37 @@
 
         </section>
 
-      </div>
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabPosts" data-tab="posts">
 
-      <footer class="footer">
+          <section class="card">
+            <div class="card-head">
+              <h2>Post Management</h2>
+              <span class="card-sub" id="postsSub">Every local record of a post the app made. Open, fix, or remove posts here.</span>
+              <button id="btnRefreshPosts" class="btn ghost small" title="Refresh posts">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table class="groups posts-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Posted</th>
+                    <th>Group</th>
+                    <th>Media</th>
+                    <th>Status</th>
+                    <th>Post link</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="postsBody">
+                  <tr><td colspan="7" class="empty-cell">No posts recorded yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        </section>
+
+      </div>
         Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app.
       </footer>
     </main>

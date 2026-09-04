@@ -31,3 +31,4 @@ Thumbs.db
 # Editor
 .idea/
 .vscode/
+.aider*

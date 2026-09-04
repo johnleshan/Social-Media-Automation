@@ -12,6 +12,7 @@ thread exactly as before. This module only:
     frontend can surface every failure mode clearly (missing profile, not
     logged in, import running/failed, login window open, ...).
 """
+import faulthandler
 import html
 import itertools
 import json
@@ -27,10 +28,12 @@ from urllib.parse import parse_qs, urlparse
 from .browser import (
     FacebookBrowser,
     find_chrome_user_data_dir,
-        import_chrome_session,
+    import_chrome_session,
     chrome_running,
     list_chrome_profiles,
     open_login,
+    _kill_chrome_on_profile,
+    _clean_stale_profile_locks,
 )
 from .config import BASE_DIR, Config
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
@@ -731,6 +734,42 @@ class AutomationState:
             self._log_lines.clear()
         return {"ok": True}
 
+    # ---- posts CRUD ----
+    def cmd_post_update(self, data):
+        """Update a post row (status / error / post_url / group_name / file_path)."""
+        try:
+            post_id = int(data.get("id") or 0)
+        except Exception:
+            return {"ok": False, "error": "bad post id"}
+        fields = {k: data.get(k) for k in (
+            "status", "error", "post_url", "group_name", "file_path")}
+        fields = {k: v for k, v in fields.items() if v is not None}
+        updated = self.db.update_post(post_id, **fields)
+        if updated is None:
+            return {"ok": False, "error": "post not found"}
+        self._push_log(f"Updated post #{post_id}.")
+        return {"ok": True, "post": updated}
+
+    def cmd_post_delete(self, data):
+        """Delete a post row from the local history."""
+        try:
+            post_id = int(data.get("id") or 0)
+        except Exception:
+            return {"ok": False, "error": "bad post id"}
+        if self.db.delete_post(post_id):
+            self._push_log(f"Deleted post #{post_id} from history.")
+            return {"ok": True}
+        return {"ok": False, "error": "post not found"}
+
+    def cmd_post_delete_group(self, data):
+        """Delete every post row for a group."""
+        gid = str(data.get("group_id") or "")
+        if not gid:
+            return {"ok": False, "error": "no group id"}
+        n = self.db.delete_posts_by_group(gid)
+        self._push_log(f"Deleted {n} post(s) for group {gid}.")
+        return {"ok": True, "deleted": n}
+
     # ------------------------------------------------------------------ queries
     def groups_json(self, status="all"):
         rows = self.db.get_groups(None if status == "all" else status)
@@ -1065,6 +1104,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/verify_session": self.st.cmd_verify,
             "/api/group/mark": self.st.cmd_group_mark,
             "/api/group/delete": self.st.cmd_group_delete,
+            "/api/post/update": self.st.cmd_post_update,
+            "/api/post/delete": self.st.cmd_post_delete,
+            "/api/post/delete_group": self.st.cmd_post_delete_group,
             "/api/logs/clear": self.st.cmd_logs_clear,
         }
         fn = handlers.get(p)
@@ -1079,7 +1121,31 @@ class Handler(BaseHTTPRequestHandler):
 
 def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
     """Start the local server and (optionally) open the browser to the UI."""
+    # If the worker ever wedges (e.g. a Playwright C call holds the GIL), the
+    # whole process can stop answering HTTP. Dump all thread stacks to a file
+    # every few seconds so we can see where it got stuck instead of guessing.
+    try:
+        dump_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "data", "stack_dump.log")
+        dump_path = os.path.normpath(dump_path)
+        faulthandler.dump_traceback_later(3.0, repeat=True, file=open(dump_path, "w", encoding="utf-8"))
+    except Exception:
+        pass
     state = AutomationState()
+    # A previously crashed run can leave an automation Chrome still holding a
+    # profile lock, which makes the next launch take forever (Chrome delegates
+    # to the old instance and never binds a fresh debug port) — the classic
+    # "stuck on Launching Chrome / Server offline" symptom. Clean those up once
+    # at boot, before the UI even tries to start anything. Bounded and
+    # best-effort; never blocks startup for long.
+    try:
+        for p in state.config.profiles:
+            d = p.get("user_data_dir") or ""
+            if d:
+                _kill_chrome_on_profile(d)
+                _clean_stale_profile_locks(d)
+    except Exception:
+        pass
     port = port or 8756
     server = None
     for candidate in range(port, port + 20):

@@ -313,6 +313,47 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_post(self, post_id):
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM posts WHERE id = ?", (int(post_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_post(self, post_id, **fields):
+        """Update editable fields of a post row. Allowed: status, error, post_url,
+        group_name, file_path."""
+        allowed = {"status", "error", "post_url", "group_name", "file_path"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return None
+        with self._lock:
+            cur = self.conn.execute(
+                f"UPDATE posts SET {', '.join(k + ' = ?' for k in updates)} WHERE id = ?",
+                (*updates.values(), int(post_id)),
+            )
+            self.conn.commit()
+            if cur.rowcount == 0:
+                return None
+            row = self.conn.execute(
+                "SELECT * FROM posts WHERE id = ?", (int(post_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_post(self, post_id):
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM posts WHERE id = ?", (int(post_id),))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def delete_posts_by_group(self, group_id):
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM posts WHERE group_id = ?", (str(group_id),)
+            )
+            self.conn.commit()
+            return cur.rowcount
+
     # ---- media rotation ----
     def mark_media_used(self, file_path):
         with self._lock:

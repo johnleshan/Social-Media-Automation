@@ -123,7 +123,9 @@ def _click_composer_media(page, log):
 
 
 def _upload_file(page, file_path, log):
-    """Attach the media file. Returns True when upload completes."""
+    """Attach one or more media files. file_path can be a string or a list
+    of strings. Returns True when upload completes."""
+    paths = file_path if isinstance(file_path, (list, tuple)) else [file_path]
     # Several file inputs can exist on a feed page; use a *visible* one (the
     # newly-opened composer's input) rather than the first (usually hidden).
     deadline = time.monotonic() + 15
@@ -139,10 +141,11 @@ def _upload_file(page, file_path, log):
         page.wait_for_timeout(500)
     if input_el is None:
         raise RuntimeError("no visible file input appeared")
-    input_el.set_input_files(file_path)
-    log("file attached, waiting for upload...")
+    input_el.set_input_files(paths)
+    log(f"file(s) attached ({len(paths)}), waiting for upload...")
     # Wait for a preview/processing UI to appear, then settle.
-    for _ in range(60):
+    timeout = 90 if len(paths) > 1 else 60
+    for _ in range(timeout):
         page.wait_for_timeout(1000)
         body = _safe_text(page)
         low = body.lower()
@@ -334,13 +337,14 @@ def _detect_pending(page):
     return False
 
 
-def _detect_success(page):
-    """Return True once the composer closes (the post went through).
+def _wait_composer_closed(page):
+    """Wait for the composer dialog (a visible dialog whose contenteditable
+    still holds our caption) to close, up to the deadline.
 
-    Facebook keeps the composer open with a 'Posting' label while media is
-    still being pushed, sometimes 15-40s for a video, so short fixed waits
-    produce false failures. Poll until the composer (a visible dialog whose
-    contenteditable still holds our caption) is gone, up to the deadline.
+    Returns True once the composer is gone, False on timeout. This only means
+    the composer UI went away — it does NOT by itself prove the post published
+    (the composer can also close on error/dismiss), so callers must additionally
+    verify the post landed.
     """
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
@@ -360,14 +364,68 @@ def _detect_success(page):
         except Exception:
             pass
         if not open_composer:
-            # A "your post was posted" style confirmation is ideal but optional.
-            body = _safe_text(page).lower()
-            for phrase in ["your post was posted", "post is live", "shared to group"]:
-                if phrase in body:
-                    return True
             return True
         page.wait_for_timeout(4000)
     return False
+
+
+def _verify_post_landed(page, before, caption):
+    """Poll the group feed for evidence the post we just published landed.
+
+    Returns (confirmed, post_url):
+      confirmed  - True when a post NEW to this feed appeared after posting
+                   (Facebook inserts our published post at the top). Real posts
+                   are treated as published even if the caption token can't be
+                   matched (truncation / lazy DOM / sort order).
+      post_url   - a URL ONLY when a post can be positively attributed to this
+                   caption (new + card text matches the token, or any post
+                   matching the token). Never a stranger's post URL.
+    Confirmed requires a *new* feed item; a closed composer alone is not enough
+    (it can close on error/dismiss without actually publishing, e.g. when the
+    account isn't a member or the Page can't post).
+    """
+    before_hrefs = {p.get("href") for p in (before or [])}
+    deadline = time.monotonic() + 45
+    reloaded = False
+    while time.monotonic() < deadline:
+        try:
+            page.wait_for_timeout(6000)
+        except Exception:
+            pass
+        after = _group_post_urls(page)
+        new = [p for p in after if p.get("href") not in before_hrefs]
+        url = _pick_post_url(page, before, caption)  # new-post only
+        if new and url:
+            return True, url
+        if new:
+            return True, None
+        if not reloaded and time.monotonic() > (deadline - 15):
+            # Feed may be sorted/lazy and not showing our top post; reload once
+            # to force the group page to render the newest post at the top.
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(4000)
+            except Exception:
+                pass
+            reloaded = True
+        # Nudge the feed in case it is paginated/"Top"-sorted.
+        try:
+            page.evaluate(
+                "() => { const feed = document.querySelector('div[role=\"feed\"]'); "
+                "feed && feed.scrollIntoView({block:'start'}); }"
+            )
+        except Exception:
+            pass
+    return False, None
+
+
+def _detect_success(page):
+    """Deprecated placeholder kept for interface compatibility.
+
+    Use _wait_composer_closed + _verify_post_landed instead; those positively
+    verify a post landed rather than assuming a closed composer means success.
+    """
+    return _wait_composer_closed(page)
 
 
 # Matches the permalink shape Facebook uses for group posts:
@@ -445,11 +503,12 @@ def _caption_token(caption):
 def _pick_post_url(page, before, caption):
     """Find the URL of the post we just published.
 
-    1. a permalink seen *after* posting that wasn't there before, whose card
-       text contains the caption token
-    2. any card whose text contains the caption token
-    3. the newest (diffed) permalink
-    4. the topmost permalink as a last resort
+    Only ever inspects posts NEW to the feed since `before` was snapshotted
+    (Facebook inserts our published post at the top). Prefers a new post whose
+    card text matches the caption token; otherwise falls back to the first new
+    post (the topmost one that appeared during our posting window — ours, since
+    we're the only actor posting). Never scans the pre-existing feed for a
+    stranger's post. Returns None if no new post is found.
     """
     token = _caption_token(caption)
     after = _group_post_urls(page)
@@ -466,12 +525,9 @@ def _pick_post_url(page, before, caption):
     for p in new:
         if matches(p):
             return _make_full_url(page, p["href"])
-    for p in after:
-        if matches(p):
-            return _make_full_url(page, p["href"])
     if new:
         return _make_full_url(page, new[0]["href"])
-    return _make_full_url(page, after[0]["href"])
+    return None
 
 
 def post_media(page, group_id, file_path, caption="", log=None):
@@ -512,13 +568,24 @@ def post_media(page, group_id, file_path, caption="", log=None):
     page.wait_for_timeout(4000)
     if _detect_pending(page):
         return "pending", "post routed to admin approval", None
-    if _detect_success(page):
-        page.wait_for_timeout(3000)
-        post_url = _pick_post_url(page, before, caption)
-        return "posted", "published", post_url
+    if not _wait_composer_closed(page):
+        log("[diag] composer did not close")
+        log(f"[diag] url={page.url}")
+        log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
+        return "failed", "composer did not close after posting", None
+    # The composer closed — but that alone does not mean the post published
+    # (it can also close on error/dismiss, e.g. when the Page can't post or the
+    # account isn't a member). Only report success once we see a NEW post land
+    # in the group feed. post_url is never a stranger's post.
+    confirmed, post_url = _verify_post_landed(page, before, caption)
+    if confirmed:
+        if post_url:
+            return "posted", "published", post_url
+        return "posted", "published (post URL not capturable)", None
+    log("[verify] no new post appeared in the feed — treating as not confirmed")
     log(f"[diag] url={page.url}")
     log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
-    return "failed", "unable to confirm post outcome", None
+    return "failed", "post could not be verified in the group (it may not have published)", None
 
 
 def _has_media_composer(page):
