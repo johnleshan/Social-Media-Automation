@@ -69,7 +69,18 @@ PAGES_BLOCKED_PHRASES = [
 
 
 def _click_composer_media(page, log):
-    """Open the media composer. Returns True on success."""
+    """Open the media composer. Returns True on success. Retries once because
+    the first attempt can race a slow group-page load."""
+    for attempt in (1, 2):
+        if _click_composer_media_once(page, log):
+            return True
+        if attempt == 1:
+            log("retrying media composer after a short wait...")
+            page.wait_for_timeout(3000)
+    return False
+
+
+def _click_composer_media_once(page, log):
     # Try each known label via Playwright's accessible-name match first.
     for label in COMPOSER_PHOTO_LABELS:
         try:
@@ -140,7 +151,21 @@ def _upload_file(page, file_path, log):
             pass
         page.wait_for_timeout(500)
     if input_el is None:
-        raise RuntimeError("no visible file input appeared")
+        # The composer may not have actually opened (a stray click, or the
+        # media toolbar re-rendered). Try to re-open it once before giving up.
+        if _click_composer_media(page, log):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    visible = page.locator('input[type="file"]:visible').first
+                    if visible.count() and visible.is_visible(timeout=800):
+                        input_el = visible
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+        if input_el is None:
+            raise RuntimeError("no visible file input appeared")
     input_el.set_input_files(paths)
     log(f"file(s) attached ({len(paths)}), waiting for upload...")
     # Wait for a preview/processing UI to appear, then settle.
@@ -298,21 +323,30 @@ def _composer_dialog(page):
 def _click_post(page, log):
     """Click the post/submit button in the composer dialog. Returns True on success."""
     # Retry window: the confirmation dialog may take a moment to render.
-    deadline = time.monotonic() + 16
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        dlg = _composer_dialog(page)
-        candidates = [dlg] if dlg is not None else []
-        if not candidates:
-            # No caption visible yet; fall back to any visible dialog (scoped,
-            # never a page-global search that can hit the notifications panel).
+        # Gather every visible dialog, caption-holding ones first. The group
+        # composer renders as layered/sibling dialogs ('Create post' +
+        # 'Add groups' / 'Add topic' panels) and the Post button can sit in a
+        # dialog OTHER than the first one that holds the caption — searching
+        # only that first dialog is why some groups fail to find the button.
+        try:
+            all_dlgs = page.locator(f'{DIALOG}:visible')
+            count = all_dlgs.count()
+            dialogs = [all_dlgs.nth(i) for i in range(min(count, 10))]
+        except Exception:
+            dialogs = []
+        cands = []
+        for d in dialogs:
             try:
-                vd = page.locator(f'{DIALOG}:visible')
-                n = vd.count()
-                for i in range(min(n, 8)):
-                    candidates.append(vd.nth(i))
+                has_cap = d.locator(f'[contenteditable="true"]:visible').count() > 0
             except Exception:
-                pass
-        for d in candidates:
+                has_cap = False
+            if has_cap:
+                cands.insert(0, d)
+            else:
+                cands.append(d)
+        for d in cands:
             for name in POST_BUTTONS:
                 try:
                     btn = d.get_by_role(
@@ -568,20 +602,24 @@ def post_media(page, group_id, file_path, caption="", log=None):
     page.wait_for_timeout(4000)
     if _detect_pending(page):
         return "pending", "post routed to admin approval", None
-    if not _wait_composer_closed(page):
-        log("[diag] composer did not close")
-        log(f"[diag] url={page.url}")
-        log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
-        return "failed", "composer did not close after posting", None
-    # The composer closed — but that alone does not mean the post published
-    # (it can also close on error/dismiss, e.g. when the Page can't post or the
-    # account isn't a member). Only report success once we see a NEW post land
-    # in the group feed. post_url is never a stranger's post.
+    # Evidence-first: the composer does NOT have to close for the post to have
+    # published (Facebook's current composer keeps a "Create post / Add groups /
+    # Add topic" overlay shell open even after submit). So verify a NEW post
+    # actually landed in the feed BEFORE trusting the composer state. Only if
+    # nothing landed do we consult composer-close + diag dumps.
     confirmed, post_url = _verify_post_landed(page, before, caption)
     if confirmed:
         if post_url:
             return "posted", "published", post_url
         return "posted", "published (post URL not capturable)", None
+    if not _wait_composer_closed(page):
+        log("[diag] composer did not close and no post landed")
+        log(f"[diag] url={page.url}")
+        log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
+        return "failed", "composer did not close after posting", None
+    # The composer closed but no new post appeared — treat as not confirmed
+    # (it can close on error/dismiss, e.g. when the Page can't post or the
+    # account isn't a member).
     log("[verify] no new post appeared in the feed — treating as not confirmed")
     log(f"[diag] url={page.url}")
     log(f"[diag] dialogs: {_visible_dialogs_text(page)}")

@@ -115,7 +115,10 @@ class AutomationState:
         self.db = Database()
         self.worker = Worker(self.config, self.db, log=self._push_log, notify=send_toast)
         self._lock = threading.Lock()
-        self._ids = itertools.count(1)
+        # Log ids must be monotonic *across* server restarts: the browser polls
+        # /api/logs?since=<last seen id>, and a counter that resets to 1 on
+        # restart makes every new line invisible until a hard page refresh.
+        self._ids = itertools.count(int(self.db.get_state("log_seq", 0) or 0) + 1)
         self._log_lines = []  # list of (id, text, level)
         self.login_state = {"running": False, "profile": None}
         self.import_state = {"running": False, "profile": None, "result": None, "message": ""}
@@ -126,9 +129,14 @@ class AutomationState:
         try:
             text = str(msg)
             with self._lock:
-                self._log_lines.append((next(self._ids), text, _classify(text)))
+                seq = next(self._ids)
+                self._log_lines.append((seq, text, _classify(text)))
                 if len(self._log_lines) > 4000:
                     del self._log_lines[:1000]
+            try:
+                self.db.set_state("log_seq", seq)
+            except Exception:
+                pass
         except Exception:
             pass
 
