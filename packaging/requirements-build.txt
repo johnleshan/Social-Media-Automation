@@ -1,0 +1,5 @@
+# Build-time dependencies (not needed at runtime).
+# Install into the project venv:  venv\Scripts\python.exe -m pip install -r packaging\requirements-build.txt
+pyinstaller>=6.10
+pyinstaller-hooks-contrib>=2024.8
+pillow>=10.0

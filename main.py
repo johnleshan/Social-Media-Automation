@@ -7,6 +7,9 @@ UI stuck on "Server offline"). The web server + worker themselves are unchanged;
 only the process that hosts them is supervised.
   --gui : legacy Tkinter desktop UI (run directly, not supervised).
   --cli : minimal console mode (run directly, not supervised).
+  --open-browser <url> : helper mode used by the packaged app to open the UI
+          from a separate process (webbrowser.open inside the web/worker process
+          natively crashes), then exit immediately.
 """
 import os
 import subprocess
@@ -15,6 +18,8 @@ import time
 
 _APP_CHILD_ENV = "GPA_APP_CHILD"
 _SUPERVISOR_PID_ENV = "GPA_SUPERVISOR_PID"
+
+_FROZEN = bool(getattr(sys, "frozen", False))
 
 
 def _is_child():
@@ -27,9 +32,15 @@ def _run_child():
     # The child watches THIS pid (the supervisor interpreter), not its immediate
     # parent, because the venv launcher sits between them and outlives nothing.
     env[_SUPERVISOR_PID_ENV] = str(os.getpid())
-    root = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.abspath(sys.executable))
+    if _FROZEN:
+        # Packaged: sys.executable IS the app already (supervisor mode is the
+        # no-flag default). Re-spawning the same exe is enough to get a child.
+        cmd = [sys.executable]
+    else:
+        cmd = [sys.executable, os.path.abspath(__file__)]
     return subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__)],
+        cmd,
         cwd=root,
         env=env,
     )
@@ -111,6 +122,19 @@ def run_supervisor():
 
 
 def main():
+    if "--open-browser" in sys.argv:
+        # Packaged-app helper mode: open a URL in the default browser via a
+        # separate process, then exit. Used instead of webbrowser.open from the
+        # web/worker process (which natively crashes).
+        try:
+            import webbrowser
+            idx = sys.argv.index("--open-browser")
+            url = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+            if url:
+                webbrowser.open(url, new=1)
+        except Exception:
+            pass
+        return
     if "--cli" in sys.argv:
         run_cli()
     elif "--gui" in sys.argv:
@@ -121,8 +145,9 @@ def main():
         _spawn_parent_watchdog()
         # Never auto-open the browser from the child: webbrowser.open() inside
         # the process that hosts the Playwright worker natively crashes. The URL
-        # is printed and the user opens it manually (opt-in via GPA_OPEN_BROWSER=1).
-        run_web_ui(open_browser=False)
+        # is printed and the user opens it manually (opt-in via GPA_OPEN_BROWSER=1;
+        # the packaged build defaults it to on and uses --open-browser helpers).
+        run_web_ui(open_browser=True)
     else:
         run_supervisor()
 

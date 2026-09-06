@@ -24,6 +24,9 @@ content/
 test-results/
 playwright-report/
 
+# Build artifacts
+installer/
+
 # OS
 Thumbs.db
 .DS_Store

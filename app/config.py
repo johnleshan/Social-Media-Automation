@@ -1,16 +1,53 @@
 """Configuration management for the bot.
 
-Stores everything in a single JSON file (data/config.json) so users can
-manage accounts and settings without touching code.
+Stores everything in a single JSON file (config.json) so users can manage
+accounts and settings without touching code.
+
+Path layout differs between source runs and installed (PyInstaller) runs:
+
+* source:  BASE_DIR = project root; data/profiles/content next to the code.
+* frozen:  BASE_DIR = read-only bundle root (web assets); all user data
+           (config.json, bot.db, Chrome profiles, media) lives under
+           %LOCALAPPDATA%\\GroupPostAutomator so the program folder stays writable-free.
 """
 import json
 import os
+import sys
 from copy import deepcopy
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+_FROZEN = getattr(sys, "frozen", False)
+
+
+def is_frozen():
+    """True when running from a packaged (PyInstaller) build."""
+    return _FROZEN
+
+# Read-only bundle root. Source: the project root. Frozen: PyInstaller's
+# extraction dir (_MEIPASS) which also holds the bundled web/ assets.
+BASE_DIR = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+if not _FROZEN:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Writable base for everything the user creates: config, db, profiles, content.
+USER_DATA_ROOT = BASE_DIR
+if _FROZEN:
+    USER_DATA_ROOT = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "GroupPostAutomator",
+    )
+
+DATA_DIR = os.path.join(USER_DATA_ROOT, "data")
+PROFILES_DIR = os.path.join(USER_DATA_ROOT, "profiles")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+
+
+def resolve_media_dir(media_folder):
+    """Resolve the configured media folder against the writable user-data root
+    so a relative default ('content') survives the move to %LOCALAPPDATA% in
+    installed builds, while absolute paths are honored as-is."""
+    return os.path.abspath(
+        os.path.join(USER_DATA_ROOT, media_folder or "content")
+    )
 
 DEFAULTS = {
     "profiles": [],

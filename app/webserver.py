@@ -33,7 +33,7 @@ from .browser import (
     _kill_chrome_on_profile,
     _clean_stale_profile_locks,
 )
-from .config import BASE_DIR, Config
+from .config import BASE_DIR, Config, is_frozen
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
 from .worker import MEDIA_EXTS, VIDEO_EXTS, Worker
 VIDEO_EXTS_SET = VIDEO_EXTS or set()
@@ -1130,17 +1130,23 @@ def _open_browser_out_of_process(url):
 
     webbrowser.open() must never run in the same process that hosts the
     Playwright worker: doing so natively crashes (0xc0000005) a few seconds
-    later. Spawning a fresh interpreter that just opens the URL and exits keeps
-    the convenience without the crash.
+    later. So we spawn a fresh interpreter that just opens the URL and exits.
+    In packaged (frozen) builds we can't run `sys.executable -c`, so we use
+    the same exe with the --open-browser helper flag (main.py handles it).
     """
     try:
-        root = os.path.dirname(os.path.abspath(__file__))
-        code = "import webbrowser,time; webbrowser.open(%r,new=1); time.sleep(1.5)" % url
+        if is_frozen():
+            helper = [sys.executable, "--open-browser", url]
+        else:
+            helper = [
+                sys.executable, "-c",
+                "import webbrowser,time; webbrowser.open(%r,new=1); time.sleep(1.5)" % url,
+            ]
         subprocess.Popen(
-            [sys.executable, "-c", code],
-            cwd=os.path.dirname(root),
+            helper,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception:
         pass
@@ -1149,12 +1155,12 @@ def _open_browser_out_of_process(url):
 def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
     """Start the local server and (optionally) open the browser to the UI.
 
-    The auto browser-open is HARD-gated behind GPA_OPEN_BROWSER=1: calling
-    webbrowser.open() from this same process that also hosts the Playwright
-    worker reliably triggers a native 0xc0000005 crash in python312.dll a few
-    seconds later (the very crash that used to leave the UI on 'Server offline'
-    and make the supervisor restart forever). So the browser is only opened when
-    the user explicitly opts in, never by default."""
+    The auto browser-open is HARD-gated behind GPA_OPEN_BROWSER=1 when running
+    from source: calling webbrowser.open() from this same process that also
+    hosts the Playwright worker reliably triggers a native 0xc0000005 crash a
+    few seconds later. So source runs only open the browser when the user
+    explicitly opts in. Packaged builds default to open (a normal user gets the
+    UI with zero clicks), still out-of-process so the crash never triggers."""
     state = AutomationState()
     # A previously crashed run can leave an automation Chrome still holding a
     # profile lock, which makes the next launch take forever (Chrome delegates
@@ -1188,10 +1194,12 @@ def run_web_ui(host="127.0.0.1", port=0, open_browser=True):
         print(f"  {url}")
         print("  Open the URL above in your browser, or press Ctrl+C to quit.")
         print("=" * 62)
-    # Auto-open is opt-in (GPA_OPEN_BROWSER=1) and is performed from a fresh,
-    # short-lived process so webbrowser.open never runs inside this process that
-    # also hosts the Playwright worker (that combination natively crashes).
-    if open_browser and os.environ.get("GPA_OPEN_BROWSER") == "1":
+    # Auto-open happens from a fresh short-lived process so webbrowser.open never
+    # runs inside this process that also hosts the Playwright worker (that
+    # combination natively crashes). Packaged builds open by default; source
+    # builds stay opt-in (GPA_OPEN_BROWSER=1) to preserve current behavior.
+    open_env = os.environ.get("GPA_OPEN_BROWSER", "1" if is_frozen() else "0")
+    if open_browser and open_env == "1":
         _open_browser_out_of_process(url)
     try:
         server.serve_forever()
