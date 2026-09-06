@@ -21,6 +21,7 @@ from datetime import datetime, date
 
 from .approval import check_group, check_membership_status
 from .browser import FacebookBrowser
+from .config import resolve_media_dir
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED
 from .discovery import (search_groups, list_my_groups, extract_group_info_from_page,
                         extract_group_activity)
@@ -58,6 +59,29 @@ def _is_generic_title(name):
     if re.fullmatch(r"\d[\d\s.,]*", name):
         return True
     return False
+
+
+def _is_browser_dead(msg):
+    """True when a Playwright failure means the Chrome/CDP connection is gone.
+
+    A dead browser shows up as 'Connection closed while reading from the
+    driver' (page object unusable) or similar transport errors. Treating these
+    as normal per-group failures would keep the batch running against a dead
+    browser forever; callers use this to trigger a relaunch and retry."""
+    msg = (msg or "").lower()
+    return any(k in msg for k in (
+        "connection closed",
+        "connection refused",
+        "browser has been closed",
+        "target closed",
+        "target page, context or browser has been closed",
+        "socket close",
+        "websocket",
+        "protocol error",
+        "driver",
+        "execution context was destroyed",
+        "net::err_connection",
+    ))
 
 
 # Keyword tables for the niche filter (lower-cased, substring matching).
@@ -841,10 +865,7 @@ class Worker:
     # ---- batch post to all my groups ----
     def _blast_groups(self):
         settings = self.config.settings
-        media_folder = os.path.abspath(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            settings.get("media_folder", "content"),
-        ))
+        media_folder = resolve_media_dir(settings.get("media_folder", "content"))
         try:
             batch = max(1, int(self.db.get_state("blast_batch", "10") or 10))
         except Exception:
@@ -947,10 +968,7 @@ class Worker:
     # ---- page post ----
     def _page_post(self, page_url):
         settings = self.config.settings
-        media_folder = os.path.abspath(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            settings.get("media_folder", "content"),
-        ))
+        media_folder = resolve_media_dir(settings.get("media_folder", "content"))
         file_path = None
         want = getattr(self, "_page_file_override", "") or ""
         if want:
@@ -989,9 +1007,7 @@ class Worker:
         soft_cap = 0 if dev else int(settings.get("soft_cap", 150))
         max_cycle = int(settings.get("max_cycle_posts", 0))
         media_folder = settings.get("media_folder", "content")
-        media_folder = os.path.abspath(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), media_folder
-        ))
+        media_folder = resolve_media_dir(media_folder)
 
         today = datetime.now().strftime("%Y-%m-%d")
         cycle_count = 0
@@ -1056,15 +1072,43 @@ class Worker:
         paths = file_paths if isinstance(file_paths, (list, tuple)) else [file_paths]
         self._set_stage("publish", g.get("name") or g["id"],
                         f"Publishing to {g['name']}...")
-        post_url = None
-        try:
-            status, message, post_url = post_media(
-                self.browser.page, g["id"], paths,
-                self._pending_caption if not caption else caption,
-                self._emit,
-            )
-        except Exception as e:
-            status, message = "failed", str(e)
+        # A failed post is retried once when the failure is definitively
+        # transient: no submission happened (composer never opened, file input
+        # never appeared, post button never clicked), so a retry cannot
+        # double-post. Browser-death ("Connection closed") is retried with a
+        # fresh Chrome. Verify-first ordering guarantees these messages mean
+        # nothing was published yet.
+        RETRY_MESSAGES = (
+            "could not find the photo/video composer",
+            "no visible file input appeared",
+            "could not find the post button",
+            "upload did not complete in time",
+        )
+        for attempt in (1, 2, 3):
+            post_url = None
+            status = message = ""
+            try:
+                status, message, post_url = post_media(
+                    self.browser.page, g["id"], paths,
+                    self._pending_caption if not caption else caption,
+                    self._emit,
+                )
+            except Exception as e:
+                status, message = "failed", str(e)
+            reason = message.lower()
+            if attempt < 3:
+                if _is_browser_dead(message):
+                    self._emit("[recover] Chrome connection lost — relaunching browser and retrying…")
+                    self._relaunch_browser()
+                    self._set_stage("publish", g.get("name") or g["id"],
+                                    f"Retrying {g['name']} after browser restart...")
+                    continue
+                if any(key in reason for key in RETRY_MESSAGES):
+                    self._emit(f"[retry] transient composer failure ('{message}') — retrying {g['name']} ({attempt + 1}/3)...")
+                    self._set_stage("publish", g.get("name") or g["id"],
+                                    f"Retrying {g['name']} after transient composer issue...")
+                    continue
+            break
         self._last_post_url = post_url
         files_label = " + ".join(os.path.basename(p) for p in paths)
         self.db.add_post(g["id"], g["name"], files_label, status, message, post_url=post_url)
@@ -1080,6 +1124,23 @@ class Worker:
         else:
             self._emit(f"[FAILED] {g['name']}: {message}")
         return status
+
+    def _relaunch_browser(self):
+        """Close the dead Chrome and start a fresh session on the same profile."""
+        name = getattr(self.browser, "user_data_dir", None)
+        headless = getattr(self.browser, "headless", True)
+        try:
+            self.browser.close()
+        except Exception:
+            pass
+        self.browser = FacebookBrowser(
+            name, headless=headless, log=self._emit,
+        )
+        try:
+            self.browser.launch()
+            self.browser.page.set_default_timeout(15000)
+        except Exception as e:
+            self._emit(f"[recover] browser relaunch failed: {e}")
 
     def _pick_media(self, folder):
         files = []

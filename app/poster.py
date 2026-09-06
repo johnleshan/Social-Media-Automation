@@ -87,44 +87,64 @@ def _click_composer_media_once(page, log):
             btn = page.get_by_role("button", name=re.compile(re.escape(label), re.IGNORECASE)).first
             if btn.is_visible(timeout=1500):
                 btn.click(timeout=8000)
-                log(f"opened media composer via '{label}'")
-                return True
+                # Verify the composer actually opened (a settable file input is
+                # present) — a clicked-but-unopened composer is worse than a retry.
+                page.wait_for_timeout(1200)
+                if _file_input(page) is not None:
+                    log(f"opened media composer via '{label}'")
+                    return True
+                log(f"clicked '{label}' but no file input appeared")
         except Exception:
             continue
-    # DOM scan: any visible element (role=button/aria-label) whose label
-    # contains a media keyword. Covers "Attach a photo or video", etc.
-    try:
-        handle = page.evaluate_handle(
-            """(labels)=>{
-                const els=document.querySelectorAll('[role="button"],[aria-label],button,span');
-                for(const el of els){
-                    const aria=(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim().toLowerCase();
-                    const txt=(el.innerText||'').replace(/\\s+/g,' ').trim().toLowerCase();
-                    const hay=aria+' '+txt;
-                    if(!hay) continue;
-                    for(const L of labels){
-                        if(hay.includes(L)){
-                            const r=el.getBoundingClientRect();
-                            if(r.width&&r.height) return el;
+    # DOM scan: iterate over visible elements (role=button/aria-label) whose
+    # label contains a media keyword, clicking each until one actually opens a
+    # composer (a concrete file input becomes present). A stray click that does
+    # not open the composer is skipped instead of being treated as success.
+    # Each element is marked '__sm_tried' on the page after being attempted so
+    # the next scan pass picks a different candidate.
+    for _ in range(8):
+        handle = None
+        try:
+            handle = page.evaluate_handle(
+                """(labels)=>{
+                    const els=document.querySelectorAll('[role="button"],[aria-label],button,span');
+                    for(const el of els){
+                        if(el.__sm_tried) continue;
+                        const aria=(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                        const txt=(el.innerText||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                        const hay=aria+' '+txt;
+                        if(!hay) continue;
+                        for(const L of labels){
+                            if(hay.includes(L)){
+                                const r=el.getBoundingClientRect();
+                                if(r.width&&r.height) return el;
+                            }
                         }
                     }
-                }
-                return null;
-            }""",
-            [L.lower() for L in COMPOSER_PHOTO_LABELS],
-        )
-        if handle is not None:
-            try:
-                is_el = handle.evaluate("el => el instanceof Element")
-            except Exception:
-                is_el = False
-            if is_el:
-                handle.scroll_into_view_if_needed(timeout=4000)
-                handle.click(timeout=6000)
+                    return null;
+                }""",
+                [L.lower() for L in COMPOSER_PHOTO_LABELS],
+            )
+            if handle is None:
+                return False
+            is_el = handle.evaluate("el => el instanceof Element")
+            if not is_el:
+                return False
+            handle.evaluate("el => { el.__sm_tried = true; }")
+            handle.scroll_into_view_if_needed(timeout=4000)
+            handle.click(timeout=6000)
+            page.wait_for_timeout(1200)
+            if _file_input(page) is not None:
                 log("opened media composer via DOM scan")
                 return True
-    except Exception:
-        pass
+        except Exception:
+            pass
+        finally:
+            if handle is not None:
+                try:
+                    handle.dispose()
+                except Exception:
+                    pass
     # Fallback: any file input already present (some layouts expose it directly).
     try:
         page.wait_for_selector('input[type="file"]', timeout=8000)
@@ -133,22 +153,47 @@ def _click_composer_media_once(page, log):
         return False
 
 
+def _file_input(page):
+    """Best file-input element to attach media to.
+
+    Facebook's composer keeps its real file input hidden (display:none) in
+    most layouts, so requiring :visible misses it. Prefer a visible input first
+    (fast path), then any input inside a visible dialog (hidden or not) — a
+    hidden input is still fully settable via Playwright's set_input_files."""
+    try:
+        inp = page.locator('input[type="file"]:visible').first
+        if inp.count() and inp.is_visible(timeout=600):
+            return inp
+    except Exception:
+        pass
+    try:
+        q = page.locator(f'{DIALOG}:visible input[type="file"]')
+        n = q.count()
+        if n:
+            return q.nth(0)
+    except Exception:
+        pass
+    try:
+        inp = page.locator('input[type="file"]').first
+        if inp.count():
+            return inp
+    except Exception:
+        pass
+    return None
+
+
 def _upload_file(page, file_path, log):
     """Attach one or more media files. file_path can be a string or a list
     of strings. Returns True when upload completes."""
     paths = file_path if isinstance(file_path, (list, tuple)) else [file_path]
-    # Several file inputs can exist on a feed page; use a *visible* one (the
-    # newly-opened composer's input) rather than the first (usually hidden).
-    deadline = time.monotonic() + 15
+    # Several file inputs can exist on a feed page; _file_input picks the
+    # composer's (visible first, else inside a visible dialog, else any).
+    deadline = time.monotonic() + 20
     input_el = None
     while time.monotonic() < deadline:
-        try:
-            visible = page.locator('input[type="file"]:visible').first
-            if visible.count() and visible.is_visible(timeout=800):
-                input_el = visible
-                break
-        except Exception:
-            pass
+        input_el = _file_input(page)
+        if input_el is not None:
+            break
         page.wait_for_timeout(500)
     if input_el is None:
         # The composer may not have actually opened (a stray click, or the
@@ -156,15 +201,12 @@ def _upload_file(page, file_path, log):
         if _click_composer_media(page, log):
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                try:
-                    visible = page.locator('input[type="file"]:visible').first
-                    if visible.count() and visible.is_visible(timeout=800):
-                        input_el = visible
-                        break
-                except Exception:
-                    pass
+                input_el = _file_input(page)
+                if input_el is not None:
+                    break
                 page.wait_for_timeout(500)
         if input_el is None:
+            log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
             raise RuntimeError("no visible file input appeared")
     input_el.set_input_files(paths)
     log(f"file(s) attached ({len(paths)}), waiting for upload...")
@@ -330,36 +372,122 @@ def _click_post(page, log):
         # 'Add groups' / 'Add topic' panels) and the Post button can sit in a
         # dialog OTHER than the first one that holds the caption — searching
         # only that first dialog is why some groups fail to find the button.
+        # Some group pages render the composer inline (no [role=dialog] at all),
+        # so also walk up the caption field's ancestor chain (the post button
+        # lives in the same wrapper as the caption).
+        scopes = []
         try:
             all_dlgs = page.locator(f'{DIALOG}:visible')
             count = all_dlgs.count()
             dialogs = [all_dlgs.nth(i) for i in range(min(count, 10))]
         except Exception:
             dialogs = []
-        cands = []
+        # Dialog scopes, caption-holding first.
         for d in dialogs:
             try:
                 has_cap = d.locator(f'[contenteditable="true"]:visible').count() > 0
             except Exception:
                 has_cap = False
             if has_cap:
-                cands.insert(0, d)
+                scopes.insert(0, d)
             else:
-                cands.append(d)
-        for d in cands:
+                scopes.append(d)
+        # Expanded-name match (prefix) so "Post", "Post to group", "Share Now"
+        # etc. all hit, plus exact matches.
+        for scope in scopes:
             for name in POST_BUTTONS:
                 try:
-                    btn = d.get_by_role(
+                    btn = scope.get_by_role(
                         "button",
-                        name=re.compile(f"^{re.escape(name)}$", re.IGNORECASE),
+                        name=re.compile(f"^({re.escape(name)})(\\b|$)", re.IGNORECASE),
                     ).first
-                    if btn.is_visible(timeout=600):
+                    if btn.count() and btn.is_visible(timeout=600):
                         btn.click(timeout=4000)
-                        log(f"clicked post button '{name}' in composer")
+                        log(f"clicked post button '{name}'")
                         return True
                 except Exception:
                     continue
+            try:
+                # Exact accessible-name match fallback for dialogs whose button
+                # label/newlines confuse prefix matching.
+                exact = "|".join(re.escape(n) for n in POST_BUTTONS)
+                btn = scope.get_by_role(
+                    "button",
+                    name=re.compile(f"^({exact})$", re.IGNORECASE),
+                ).first
+                if btn.count() and btn.is_visible(timeout=400):
+                    btn.click(timeout=4000)
+                    log("clicked post button via exact name fallback")
+                    return True
+            except Exception:
+                continue
+        # Page-wide proximity fallback: from the caption field, find the closest
+        # visible button whose label is a post/share keyword. Only used when the
+        # composer is confirmed open (caption field present), which avoids
+        # newsfeed comment 'Post' buttons stealing the click.
+        try:
+            node = page.evaluate_handle(
+                """()=>{
+                    const CE=document.querySelectorAll('[contenteditable="true"]');
+                    let cap=null;
+                    for(const c of CE){
+                        const r=c.getBoundingClientRect();
+                        if(r.width&&r.height) cap=c;
+                    }
+                    if(!cap) return null;
+                    const capR=cap.getBoundingClientRect();
+                    const capX=capR.left+capR.width/2, capY=capR.top+capR.height/2;
+                    const names=['post','share now','share'];
+                    let best=null,bestD=1e18;
+                    const els=document.querySelectorAll('[role="button"],[aria-label],button');
+                    for(const el of els){
+                        const aria=(el.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                        const txt=(el.innerText||'').replace(/\\s+/g,' ').trim().toLowerCase();
+                        const hay=aria+' '+txt;
+                        if(!hay) continue;
+                        let ok=false;
+                        for(const n of names){
+                            const m=hay.match(new RegExp('^'+n.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')+'(\\\\b|$)'));
+                            if(m){ok=true;break;}
+                        }
+                        if(!ok) continue;
+                        const r=el.getBoundingClientRect();
+                        if(!(r.width&&r.height)) continue;
+                        const d=Math.abs((r.left+r.width/2)-capX)+Math.abs((r.top+r.height/2)-capY);
+                        if(d<bestD){bestD=d;best=el;}
+                    }
+                    return best;
+                }"""
+            )
+            if node is not None:
+                is_el = node.evaluate("el => el instanceof Element")
+                if is_el:
+                    node.click(timeout=4000)
+                    log("clicked post button via proximity fallback")
+                    try:
+                        node.dispose()
+                    except Exception:
+                        pass
+                    return True
+            try:
+                if node is not None:
+                    node.dispose()
+            except Exception:
+                pass
+        except Exception:
+            pass
         page.wait_for_timeout(700)
+    # Last-resort: Facebook submits group posts with Ctrl+Enter on the caption.
+    try:
+        cap = page.locator(f'{DIALOG}:visible [contenteditable="true"]:visible').last
+        if cap.count() and cap.is_visible(timeout=400):
+            cap.click(timeout=1500)
+            page.keyboard.press("Control+Enter")
+            log("submitted composer via Ctrl+Enter after button search failed")
+            return True
+    except Exception:
+        pass
+    log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
     return False
 
 
