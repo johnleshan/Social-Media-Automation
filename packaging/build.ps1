@@ -15,6 +15,10 @@
         - Inno Setup 6 (ISCC.exe). The script installs it silently via winget if
           winget is available; otherwise it prints manual instructions.
 #>
+param(
+    [string]$Seed = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $ROOT   = Split-Path -Parent $MyInvocation.MyCommand.Path | Split-Path -Parent
@@ -22,12 +26,31 @@ $VENV   = Join-Path $ROOT "venv"
 $PYTHON = Join-Path $VENV "Scripts\python.exe"
 $PIP    = Join-Path $VENV "Scripts\pip.exe"
 $ISCC   = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+$MARKER = Join-Path $ROOT "packaging\seed_source.txt"
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Group Post Automator  —  Build"
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
+
+# ---- 0. Optional source-workspace seed -----------------------------------------------
+# When -Seed <workspace> is given, the built app adopts that workspace's existing
+# data/ + profiles/ on first launch (see app/config.py migrate_source_setup()).
+# Omit -Seed to build a fresh installer that starts with a one-time login.
+if ($Seed) {
+    if (-not (Test-Path (Join-Path $Seed "data\bot.db"))) {
+        Write-Host "Seed workspace has no data\bot.db — aborting." -ForegroundColor Red
+        exit 1
+    }
+    $SeedResolved = [System.IO.Path]::GetFullPath($Seed).TrimEnd("\")
+    # Use UTF8 without BOM so config._load_seed_root() reads a clean path.
+    [System.IO.File]::WriteAllText($MARKER, $SeedResolved, (New-Object System.Text.UTF8Encoding $false))
+    Write-Host "[Seed] Installed app will import setup from: $SeedResolved" -ForegroundColor Cyan
+} elseif (Test-Path $MARKER) {
+    Remove-Item $MARKER -Force
+    Write-Host "[Seed] Removed old seed marker — builds are now fresh." -ForegroundColor Cyan
+}
 
 # ---- 1. Ensure build deps in the venv ------------------------------------------------
 Write-Host "[1/4] Installing build dependencies..."

@@ -26,6 +26,7 @@ playwright-report/
 
 # Build artifacts
 installer/
+packaging/seed_source.txt
 
 # OS
 Thumbs.db

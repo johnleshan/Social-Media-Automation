@@ -12,6 +12,7 @@ Path layout differs between source runs and installed (PyInstaller) runs:
 """
 import json
 import os
+import shutil
 import sys
 from copy import deepcopy
 
@@ -39,6 +40,85 @@ if _FROZEN:
 DATA_DIR = os.path.join(USER_DATA_ROOT, "data")
 PROFILES_DIR = os.path.join(USER_DATA_ROOT, "profiles")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+
+
+def _load_seed_root():
+    """Path of the project workspace that produced this build, or None.
+
+    In installed (frozen) builds the bundle carries a small file
+    'seed_source.txt' (written at build time by packaging/build.ps1). On the
+    machine that built it, the folder still exists, so a first launch can adopt
+    the existing accounts/groups/profiles and the installed app starts fully
+    set up — exactly like running python main.py. On any other machine the path
+    won't exist, so nothing is imported and the app starts fresh."""
+    if not _FROZEN:
+        return None
+    marker = os.path.join(BASE_DIR, "seed_source.txt")
+    if not os.path.isfile(marker):
+        return None
+    try:
+        with open(marker, "r", encoding="utf-8-sig") as fh:
+            root = fh.read().strip()
+    except OSError:
+        return None
+    if root and os.path.isdir(os.path.join(root, "data")):
+        return root
+    return None
+
+
+def migrate_source_setup():
+    """One-time import of an existing project setup into the installed app.
+
+    Only runs in installed builds and only when the installed app has no
+    config.json yet (i.e. this is the first launch). Copies:
+      * data/config.json + data/bot.db   (accounts, groups, settings, history)
+      * profiles/<name>                  (logged-in Chrome sessions)
+    then rewrites each profile's user_data_dir to the local install location."""
+    if not _FROZEN:
+        return
+    if os.path.exists(CONFIG_PATH):
+        return  # already initialised (user may have added an account)
+    root = _load_seed_root()
+    if not root:
+        return
+    src_data = os.path.join(root, "data")
+    src_profiles = os.path.join(root, "profiles")
+    try:
+        ensure_dirs()
+        # Bot DB + config first (cheap), so groups/accounts appear immediately.
+        for fn in ("bot.db", "config.json"):
+            src = os.path.join(src_data, fn)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(DATA_DIR, fn))
+        # Chrome profiles: copy each logged-in session so the install is
+        # self-contained; skip live/locked dirs and keep going.
+        if os.path.isdir(src_profiles):
+            for name in os.listdir(src_profiles):
+                src = os.path.join(src_profiles, name)
+                dst = os.path.join(PROFILES_DIR, name)
+                if os.path.isdir(src) and not os.path.exists(dst):
+                    try:
+                        shutil.copytree(src, dst, ignore_dangling_symlinks=True,
+                                        dirs_exist_ok=True)
+                    except OSError:
+                        continue
+        # Point profiles at the local copy.
+        cfg_path = os.path.join(DATA_DIR, "config.json")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                for prof in data.get("profiles", []):
+                    dst = os.path.join(PROFILES_DIR, prof.get("name", ""))
+                    if os.path.isdir(dst):
+                        prof["user_data_dir"] = dst
+                with open(cfg_path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, indent=2, ensure_ascii=False)
+            except (OSError, json.JSONDecodeError):
+                pass
+        print(f"[migrate] imported existing setup from {root}", flush=True)
+    except OSError:
+        pass
 
 
 def resolve_media_dir(media_folder):
@@ -81,6 +161,7 @@ def ensure_dirs():
 class Config:
     def __init__(self, path=CONFIG_PATH):
         self.path = path
+        migrate_source_setup()
         ensure_dirs()
         self.data = self._load()
 
