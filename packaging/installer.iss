@@ -13,7 +13,7 @@ DefaultDirName={localappdata}\Programs\GroupPostAutomator
 DefaultGroupName=Group Post Automator
 OutputDir=installer
 OutputBaseFilename=GroupPostAutomatorSetup
-SetupIconFile=packaging\app.ico
+SetupIconFile=app.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -31,7 +31,7 @@ Name: "startmenuicon"; Description: "Create a &Start Menu shortcut"; GroupDescri
 
 [Files]
 ; Copy the entire onedir build output into the install folder.
-Source: "dist\GroupPostAutomator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\GroupPostAutomator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Group Post Automator"; Filename: "{app}\GroupPostAutomator.exe"; WorkingDir: "{app}"
