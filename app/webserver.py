@@ -35,6 +35,7 @@ from .browser import (
 )
 from .config import BASE_DIR, Config, is_frozen
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
+from .pages import list_account_pages
 from .worker import MEDIA_EXTS, VIDEO_EXTS, Worker
 VIDEO_EXTS_SET = VIDEO_EXTS or set()
 
@@ -123,6 +124,7 @@ class AutomationState:
         self.login_state = {"running": False, "profile": None}
         self.import_state = {"running": False, "profile": None, "result": None, "message": ""}
         self.verify_state = {"running": False, "profile": None, "result": None, "message": ""}
+        self.pages_state = {"running": False, "profile": None, "result": None, "message": ""}
 
     # ------------------------------------------------------------------ log stream
     def _push_log(self, msg):
@@ -329,10 +331,19 @@ class AutomationState:
                 fb = FacebookBrowser(profile["user_data_dir"], headless=True, log=self._push_log)
                 fb.launch()
                 ok = fb.is_logged_in(timeout_ms=45000)
-                fb.close()
                 if ok:
                     self.db.set_state(f"session_verified:{name}", "ok")
                     self._push_log("Session verified: logged in. You can start posting.")
+                    # While the browser is open anyway, discover the account's Pages
+                    # so the Pages tab / identity picker is kept fresh automatically.
+                    try:
+                        pages = list_account_pages(fb.page, self._push_log)
+                        if pages:
+                            self.config.set_profile_pages(name, pages)
+                    except Exception as e:
+                        self._push_log(f"Could not auto-discover Pages: {e}")
+                fb.close()
+                if ok:
                     with self._lock:
                         self.verify_state.update(running=False, result="ok", message="Logged in.")
                 else:
@@ -347,6 +358,47 @@ class AutomationState:
                 self._push_log(f"Session check failed: {e}")
                 with self._lock:
                     self.verify_state.update(running=False, result="error", message=str(e))
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _start_pages_refresh(self, name):
+        """Find the Pages an account manages and store them on the profile."""
+        profile = self.config.get_profile(name)
+        if not profile:
+            return
+        with self._lock:
+            if self.pages_state.get("running"):
+                return
+            self.pages_state = {"running": True, "profile": name, "result": None, "message": ""}
+
+        def job():
+            try:
+                self._push_log(f"Finding Pages for '{name}'...")
+                fb = FacebookBrowser(profile["user_data_dir"], headless=True, log=self._push_log)
+                fb.launch()
+                ok = fb.is_logged_in(timeout_ms=45000)
+                if not ok:
+                    fb.close()
+                    self._push_log("Not logged into Facebook on this profile.")
+                    with self._lock:
+                        self.pages_state.update(running=False, result="no_session",
+                                                message="Not logged in.")
+                    return
+                try:
+                    pages = list_account_pages(fb.page, self._push_log)
+                finally:
+                    fb.close()
+                self.config.set_profile_pages(name, pages)
+                with self._lock:
+                    self.pages_state.update(
+                        running=False, result="ok",
+                        message=f"{len(pages)} Page(s) found" if pages
+                                else "No Pages found yet.",
+                    )
+            except Exception as e:
+                self._push_log(f"Finding Pages failed: {e}")
+                with self._lock:
+                    self.pages_state.update(running=False, result="error", message=str(e))
 
         threading.Thread(target=job, daemon=True).start()
 
@@ -491,7 +543,10 @@ class AutomationState:
             return {"ok": False, "error": "No account selected."}
         page_url = str(data.get("page_url") or "").strip()
         if not page_url:
-            return {"ok": False, "error": "No Page URL provided."}
+            # No explicit target: fall back to the account's active Page.
+            page_url = self.config.active_page(profile)
+        if not page_url:
+            return {"ok": False, "error": "No Page URL provided. Pick a Page in the Pages tab or paste a URL."}
         caption = str(data.get("caption") or "")
         file_name = str(data.get("file_name") or "")
         self.config.set("last_profile", profile)
@@ -500,6 +555,40 @@ class AutomationState:
             self._push_log(f"Page posting started: {page_url}")
         return {"ok": ok, "busy": self.worker.is_busy(),
                 "error": None if ok else "Could not start — see the log."}
+
+    def cmd_pages_refresh(self, data):
+        name = data.get("name") or self._selected_name() or ""
+        profile = self.config.get_profile(name)
+        if not profile:
+            return {"ok": False, "error": f"Unknown account '{name}'."}
+        if self.worker.is_busy():
+            return {"ok": False, "error": "A job is running; Pages can't be checked right now."}
+        with self._lock:
+            if (self.login_state.get("running") or self.import_state.get("running")
+                    or self.verify_state.get("running") or self.pages_state.get("running")):
+                return {"ok": False, "error": "Another browser operation is in progress. Wait a moment."}
+        self._start_pages_refresh(name)
+        return {"ok": True}
+
+    def cmd_pages_select(self, data):
+        name = data.get("name") or self._selected_name() or ""
+        profile = self.config.get_profile(name)
+        if not profile:
+            return {"ok": False, "error": f"Unknown account '{name}'."}
+        url = str(data.get("page_url") or "").strip()
+        pages = profile.get("pages") or []
+        if url and not any((pg.get("url") or "").strip() == url for pg in pages):
+            return {"ok": False, "error": "That Page is not on this account yet — press Find my pages first."}
+        if url:
+            pg = next((p for p in pages if (p.get("url") or "").strip() == url), {})
+            self.config.set_active_page(name, url)
+            self._push_log(
+                f"Operating as Page '{pg.get('name') or url}' for account '{name}'."
+            )
+        else:
+            self.config.set_active_page(name, "")
+            self._push_log(f"Account '{name}' will operate as your profile (not a Page).")
+        return {"ok": True, "active_page": url}
 
     def _interrupted_job(self):
         """A job that was running when the app last died (crash/power loss).
@@ -884,6 +973,7 @@ class AutomationState:
             login = dict(self.login_state)
             imp = dict(self.import_state)
             verify = dict(self.verify_state)
+            pages_state = dict(self.pages_state)
         sel = None
         if selected:
             sel = {"name": selected, "status": self._profile_status(selected)}
@@ -958,6 +1048,19 @@ class AutomationState:
         except Exception:
             sync_result = None
 
+        # flattened pages / identity info for the selected account (the UI
+        # reads these directly; the full list also lives in profiles[])
+        sel_profile = self.config.get_profile(selected) if selected else None
+        account_pages = (sel_profile.get("pages") or []) if sel_profile else []
+        selected_active = (sel_profile.get("active_page") or "") if sel_profile else ""
+        selected_active_name = selected_active
+        for pg in account_pages:
+            if (pg.get("url") or "").strip() == selected_active:
+                selected_active_name = pg.get("name") or selected_active
+                break
+        if not selected_active:
+            selected_active_name = ""
+
         return {
             "ok": True,
             "busy": w.is_busy(),
@@ -987,6 +1090,10 @@ class AutomationState:
             "login": login,
             "import": imp,
             "verify": verify,
+            "pages": account_pages,
+            "active_page": selected_active,
+            "active_page_name": selected_active_name,
+            "pages_state": pages_state,
             "interrupted_job": self._interrupted_job(),
             "system": self._system(selected),
         }
@@ -1004,7 +1111,7 @@ class AutomationState:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "GroupPostAutomator/1.0"
+    server_version = "GroupPostAutomator/2.0"
 
     def log_message(self, *args):  # keep the console clean
         pass
@@ -1108,6 +1215,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/settings": self.st.cmd_settings,
             "/api/prefs": self.st.cmd_prefs,
             "/api/verify_session": self.st.cmd_verify,
+            "/api/pages/refresh": self.st.cmd_pages_refresh,
+            "/api/pages/select": self.st.cmd_pages_select,
             "/api/group/mark": self.st.cmd_group_mark,
             "/api/group/delete": self.st.cmd_group_delete,
             "/api/post/update": self.st.cmd_post_update,

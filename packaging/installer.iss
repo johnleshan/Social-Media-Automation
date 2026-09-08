@@ -7,7 +7,7 @@
 [Setup]
 AppId={{C8D5D0A0-B2C4-4D8B-9F0B-3A2A8C0E4F0C}
 AppName=Group Post Automator
-AppVersion=0.1.0
+AppVersion=2.0.0
 AppPublisher=Jovesh
 DefaultDirName={localappdata}\Programs\GroupPostAutomator
 DefaultGroupName=Group Post Automator
@@ -92,8 +92,26 @@ begin
   Result := True;
 end;
 
+// ---- Upgrade continuity -----------------------------------------------------
+// Updates install over the previous build in place (same AppId). All user data
+// (accounts, groups, settings, post history, Chrome profiles) lives OUTSIDE the
+// program folder under %LOCALAPPDATA%\GroupPostAutomator, so an update never
+// removes or resets it. We detect an existing install and say so explicitly so
+// nobody uninstalls first expecting a "clean" upgrade.
+function IsUpgrade: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\GroupPostAutomator.exe'));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
+  begin
     KillGroupPostAutomator;
+    if IsUpgrade then
+      MsgBox('Upgrading Group Post Automator...' + #13#10#13#10 +
+             'Your accounts, groups, settings and post history are preserved.' + #13#10 +
+             'This update does not reset or clear anything.',
+             mbInformation, MB_OK);
+  end;
 end;

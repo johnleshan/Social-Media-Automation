@@ -581,6 +581,12 @@ function render() {
   renderTabs();
   renderStepper(st);
 
+  // identity + Pages picker
+  renderIdentity(st);
+  renderPagesStatus(st);
+  renderPagesList(st);
+  renderPagePostPicker(st);
+
   // groups refresh (only if tab visible & every ~4s)
   if (!document.hidden && !state.groupTimer) {
     state.groupTimer = setTimeout(() => {
@@ -863,8 +869,19 @@ function renderStepper(st) {
     container.innerHTML = "";
 
     const job = st.job;
-    const steps = STEP_DEFS[job] || STEP_DEFS.run;
-    const map = STEP_IDX[job] || STEP_IDX.run;
+    const baseSteps = STEP_DEFS[job] || STEP_DEFS.run;
+    const baseMap = STEP_IDX[job] || STEP_IDX.run;
+    const hasPage = !!st.active_page;
+    // When the account operates as a Page, the very first thing every job
+    // does is switch the session into that Page — reflect it as step 1.
+    const steps = hasPage ? ["Switch to Page", ...baseSteps] : baseSteps;
+    const map = {};
+    if (hasPage) {
+      map.page = 0;
+      for (const k in baseMap) map[k] = (baseMap[k] ?? 0) + 1;
+    } else {
+      Object.assign(map, baseMap);
+    }
     const current = map[st.stage] ?? 0;
 
     let detail = st.stage_detail || "";
@@ -1044,6 +1061,141 @@ function maybeAutoVerify(st) {
   }
 }
 
+/* ---------------- identity + Pages ---------------- */
+function renderIdentity(st) {
+  const activeName = st.active_page_name || "";
+  const chip = $("#identityChip");
+  if (chip) {
+    if (activeName) {
+      chip.textContent = activeName + " · Page";
+      $("#identityChipBtn").title =
+        `Operating as your Page "${activeName}" — all tasks run as it. Click to change.`;
+    } else {
+      chip.textContent = "profile";
+      $("#identityChipBtn").title =
+        "Operating as your profile — sync, posting, scanning and joining run as the account. Click to switch to a Page.";
+    }
+  }
+  const dev = !!(st.settings && st.settings.developer_mode);
+  const devChip = $("#devChipBtn");
+  if (devChip) devChip.classList.toggle("hidden", !dev);
+}
+
+function renderPagesStatus(st) {
+  const el = $("#pagesStatus");
+  if (!el) return;
+  const ps = st.pages_state || {};
+  if (!st.selected) {
+    el.innerHTML = "<span>Add an account to manage its Pages.</span>";
+    return;
+  }
+  if (ps.running) {
+    el.innerHTML =
+      `<span class="pill running">Finding pages…</span> loading the Pages for <strong>${esc(st.selected.name)}</strong>`;
+    return;
+  }
+  if (ps.result === "no_session") {
+    el.innerHTML =
+      `<span class="err">Not logged in — open the account and log in once, then find pages again.</span>`;
+    return;
+  }
+  if (ps.result === "error") {
+    el.innerHTML = `<span class="err">Could not find pages: ${esc(ps.message || "unknown error")}</span>`;
+    return;
+  }
+  if (ps.result === "ok" && ps.message) {
+    el.innerHTML = `<span class="ok">✓ ${esc(ps.message)}</span>`;
+    return;
+  }
+  if (st.pages && st.pages.length) {
+    el.innerHTML =
+      `<span>${st.pages.length} Page(s) — pick one to operate as, or keep <strong>Profile</strong>.</span>`;
+  } else {
+    el.innerHTML =
+      `<span>No Pages found yet for <strong>${esc(st.selected.name)}</strong>. Press <strong>Find my pages</strong>.</span>`;
+  }
+}
+
+function renderPagesList(st) {
+  const list = $("#pagesList");
+  if (!list) return;
+  const pages = st.pages || [];
+  const active = st.active_page || "";
+  const profileOpt = `
+    <label class="page-opt po-profile ${active ? "" : "active"}">
+      <input type="radio" name="pagePick" value="" ${active ? "" : "checked"}>
+      <span class="po-name">My profile</span>
+      <span class="po-url">Run tasks as the account itself</span>
+      <span class="po-tag">PROFILE</span>
+    </label>`;
+  const pageOpts = pages.map((p) => `
+    <label class="page-opt ${(p.url === active) ? "active" : ""}">
+      <input type="radio" name="pagePick" value="${esc(p.url)}" ${(p.url === active) ? "checked" : ""}>
+      <span class="po-name">${esc(p.name)}</span>
+      <span class="po-url">${esc(p.url)}</span>
+      <span class="po-tag">PAGE</span>
+    </label>`).join("");
+  list.innerHTML = pages.length
+    ? profileOpt + pageOpts
+    : `<div class="pages-empty">Press <strong>Find my pages</strong> (or re-check your session) to list the Pages this account manages.</div>`;
+  $$("input[name=pagePick]", list).forEach((r) => {
+    r.addEventListener("change", async () => {
+      if (!r.checked) return;
+      try {
+        const res = await api("/api/pages/select", {
+          method: "POST",
+          body: { name: st.selected.name, page_url: r.value },
+        });
+        if (res.ok) {
+          toast(r.value ? "Now operating as that Page." : "Now operating as your profile.", "success");
+        } else {
+          toast(res.error || "Could not switch identity.", "error");
+        }
+      } catch (e) { toast("Failed to switch identity: " + e.message, "error"); }
+    });
+  });
+}
+
+function renderPagePostPicker(st) {
+  const sel = $("#pagePostSelect");
+  if (!sel) return;
+  const active = st.active_page || "";
+  const activeName = st.active_page_name || "";
+  const pages = st.pages || [];
+  sel.innerHTML = "";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = activeName
+    ? "Use active Page: " + activeName
+    : "Paste a Page URL below…";
+  sel.appendChild(blank);
+  pages.forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.url;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => {
+    if (sel.value) $("#pagePostUrl").value = sel.value;
+  };
+  // When an active Page is set, prefill the URL input so "Post to Page"
+  // targets it without typing.
+  if (active && !$("#pagePostUrl").value.trim()) {
+    const ap = pages.find((p) => p.url === active);
+    if (ap) $("#pagePostUrl").value = ap.url;
+  }
+}
+
+async function pagesRefresh() {
+  const name = $("#profileSelect").value;
+  if (!name) return toast("Select an account first.", "warn");
+  try {
+    const r = await api("/api/pages/refresh", { method: "POST", body: { name } });
+    if (r.ok) toast("Finding your Pages…", "info");
+    else toast(r.error || "Could not start.", "error");
+  } catch (e) { toast("Failed: " + e.message, "error"); }
+}
+
 /* ---------------- recent posts ---------------- */
 async function renderRecent() {
   try {
@@ -1194,7 +1346,7 @@ async function pagePostRun() {
   const profile = $("#profileSelect").value;
   const pageUrl = $("#pagePostUrl").value.trim();
   if (!profile) return toast("Add an account first.", "warn");
-  if (!pageUrl) return toast("Enter the Page URL.", "warn");
+  // Empty URL is fine — the backend falls back to the account's active Page.
   try {
     const r = await api("/api/page_post", { method: "POST", body: { profile, page_url: pageUrl, caption: getCaption() } });
     if (r.ok) { toast("Page posting started.", "success"); teleport("activity"); }
@@ -1829,6 +1981,11 @@ function bind() {
 
   // "posted today" chip -> open today's posted posts list
   $("#postedChipBtn").addEventListener("click", openTodayPosts);
+
+  // Pages tab picker + identity chips
+  $("#btnRefreshPages")?.addEventListener("click", pagesRefresh);
+  $("#identityChipBtn")?.addEventListener("click", () => switchTab("pages"));
+  $("#devChipBtn")?.addEventListener("click", openSettings);
 
   // modal close wiring
   $$(".modal").forEach((m) => {

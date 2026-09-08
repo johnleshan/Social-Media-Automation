@@ -45,6 +45,11 @@
         <span class="tab-label">Groups</span>
         <span class="tab-badge hidden" id="badgeGroups" aria-live="polite">0</span>
       </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="pages" id="tabPages">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/></svg>
+        <span class="tab-label">Pages</span>
+        <span id="badgePages" class="tab-badge hidden" aria-live="polite">1</span>
+      </button>
       <button class="tab-btn" role="tab" aria-selected="false" data-tab="activity" id="tabActivity">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20"/><path d="M6.5 17H14"/><path d="M10 13h4"/><path d="M10 9h4"/><path d="M10 5h4"/></svg>
         <span class="tab-label">Activity</span>
@@ -78,6 +83,16 @@
         </div>
         <button class="chip chip-click" id="postedChipBtn" type="button" title="Click to see today's posted posts">
           <span class="chip-icon">▲</span><span id="postedChip">0</span> posted today
+        </button>
+        <button class="chip chip-click" id="identityChipBtn" type="button"
+                title="This identity is used for syncing groups, posting, scanning and joining. Click to switch in the Pages tab."
+                data-tab-target="pages">
+          <span class="chip-icon">▶</span><span id="identityChip">profile</span>
+        </button>
+        <button class="chip chip-warn chip-click hidden" id="devChipBtn" type="button"
+                title="Developer mode is ON — safety caps are relaxed. Click to open Settings."
+                data-tab-target="settings">
+          <span class="chip-icon">⚙</span><span id="devChip">Developer mode</span>
         </button>
       </div>
     </header>
@@ -361,13 +376,17 @@
           <section class="card pagepost-card">
             <div class="card-head">
               <h2>Post to My Page</h2>
-              <span class="card-sub">Post the composed content to one of your Facebook Pages (e.g. myearnify)</span>
+              <span class="card-sub">Post the composed content to one of your Facebook Pages</span>
             </div>
             <div class="blast-controls">
               <div class="field grow">
+                <label for="pagePostSelect">Pages on this account</label>
+                <select id="pagePostSelect"></select>
+              </div>
+              <div class="field grow">
                 <label for="pagePostUrl">Page URL</label>
-                <input type="text" id="pagePostUrl" value="https://www.facebook.com/profile.php?id=61591511835366"
-                       placeholder="https://www.facebook.com/... page id/photourl">
+                <input type="text" id="pagePostUrl" value=""
+                       placeholder="https://www.facebook.com/your-page">
               </div>
               <button id="btnPagePost" class="btn success grow" title="Post the composed text &amp; media to the Page">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
@@ -509,6 +528,31 @@
           </div>
         </section>
 
+        <!-- -------- PAGES TAB -------- -->
+        <section class="tab-panel" role="tabpanel" aria-labelledby="tabPages" data-tab="pages">
+          <div class="pages-layout">
+
+            <!-- ============ IDENTITY / PAGE PICKER ============ -->
+            <section class="card">
+              <div class="card-head">
+                <h2>Post as</h2>
+                <span class="card-sub">Choose which Page the app operates as — syncing groups, batch posting, scanning, joining and page posts all run as the selected Page.</span>
+                <div class="head-spacer"></div>
+                <button id="btnRefreshPages" class="btn ghost small" title="Find the Pages this account manages on Facebook">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                  Find my pages
+                </button>
+              </div>
+              <div id="pagesStatus" class="pages-status" role="status">Loading…</div>
+              <div id="pagesList" class="pages-list">
+                <div class="pages-empty">Press <strong>Find my pages</strong> (or re-check your session) to list the Pages this account manages.</div>
+              </div>
+              <p class="hint">The app always starts by switching the browser session into the active Page, so every task speaks as the Page — not your profile. Leave it on <strong>Profile</strong> to run tasks as your account instead.</p>
+            </section>
+
+          </div>
+        </section>
+
         <!-- -------- ACTIVITY TAB -------- -->
         <section class="tab-panel" role="tabpanel" aria-labelledby="tabActivity" data-tab="activity">
 
@@ -615,7 +659,7 @@
         </section>
 
       </div>
-        Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app.
+        Runs entirely on your PC · The existing browser session is reused — no passwords are stored by the app · v2.0.0
       </footer>
     </main>
   </div>

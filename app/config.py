@@ -203,10 +203,40 @@ class Config:
             return False
         user_data_dir = user_data_dir or os.path.join(PROFILES_DIR, name)
         self.data["profiles"].append(
-            {"name": name, "user_data_dir": os.path.abspath(user_data_dir)}
+            {"name": name, "user_data_dir": os.path.abspath(user_data_dir),
+             "pages": [], "active_page": ""}
         )
         self.save()
         return True
+
+    def set_profile_pages(self, name, pages):
+        """Store the Pages discovered for an account.
+
+        Clears ``active_page`` when it no longer refers to a known Page so the
+        app never tries to switch into a stale/removed Page."""
+        p = self.get_profile(name)
+        if not p:
+            return
+        p["pages"] = list(pages or [])
+        active = (p.get("active_page") or "").strip()
+        if active and not any((pg.get("url") or "").strip() == active
+                              for pg in p["pages"]):
+            p["active_page"] = ""
+        self.save()
+
+    def set_active_page(self, name, url=""):
+        """Pick the Page the app operates as (empty = the profile identity)."""
+        p = self.get_profile(name)
+        if not p:
+            return
+        p["active_page"] = str(url or "").strip()
+        self.save()
+
+    def active_page(self, name):
+        p = self.get_profile(name)
+        if not p:
+            return ""
+        return str(p.get("active_page") or "").strip()
 
     def remove_profile(self, name):
         self.data["profiles"] = [p for p in self.profiles if p["name"] != name]

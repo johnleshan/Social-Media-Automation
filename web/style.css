@@ -231,6 +231,8 @@ body {
 .chip-click { cursor: pointer; transition: border-color .15s ease, color .15s ease; font: inherit; line-height: inherit; }
 .chip-click:hover { border-color: var(--border-strong); color: var(--text); }
 .chip-click:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip-warn { border-color: rgba(234,179,8,.4); color: #facc15; }
+.chip-warn .chip-icon { color: #facc15; }
 
 .today-posts-list {
   display: flex; flex-direction: column; gap: 8px;
@@ -1006,6 +1008,60 @@ tr:hover .row-actions, tr.selected .row-actions { opacity: 1; }
   gap: 14px;
   align-items: start;
 }
+
+/* ============ PAGES TAB LAYOUT ============ */
+.pages-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 640px);
+  gap: 14px;
+  align-items: start;
+}
+.pages-status {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 2px 0 10px;
+}
+.pages-status .ok { color: var(--green); }
+.pages-status .err { color: var(--red); }
+.pages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.pages-empty {
+  padding: 16px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+.page-opt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.page-opt:hover { border-color: var(--border-strong); background: var(--card-hover); }
+.page-opt.active { border-color: var(--accent); }
+.page-opt input[type="radio"] { accent-color: var(--accent); flex: none; }
+.page-opt .po-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-opt .po-url { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.page-opt .po-tag {
+  flex: none; font-size: 10.5px; font-weight: 700;
+  padding: 2px 8px; border-radius: 999px; letter-spacing: .03em;
+  background: rgba(34,197,94,.12); color: var(--green);
+  border: 1px solid rgba(34,197,94,.3);
+}
+.page-opt.active .po-tag { background: rgba(34,197,94,.2); }
+.page-opt.po-profile .po-tag { background: rgba(148,163,184,.12); color: #94a3b8; border-color: rgba(148,163,184,.3); }
+.pages-hint { margin-top: 6px; }
 
 /* ============ STEPPER ============ */
 .stepper-card { overflow: visible; }

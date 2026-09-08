@@ -26,6 +26,7 @@ from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED,
 from .discovery import (search_groups, list_my_groups, extract_group_info_from_page,
                         extract_group_activity)
 from .joiner import join_group
+from .pages import activate_page
 from .poster import post_media, post_media_to_page, group_is_page_postable
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -196,6 +197,8 @@ class Worker:
         self._pending_caption = ""  # browser-held caption for the current run
         self.blast_posted = []  # groups actually posted in the current batch cycle
         self._last_post_url = None
+        self._page_url_override = ""  # optional explicit target for page_post
+        self._page_file_override = ""  # optional explicit media file for page_post
 
     # ---- public API ----
     def is_busy(self):
@@ -358,6 +361,8 @@ class Worker:
                 )
                 return
 
+            self._activate_active_page(profile)
+
             if keyword:
                 self._scan_groups(keyword, filter_mode, min_members)
 
@@ -382,7 +387,10 @@ class Worker:
                 return
 
             if self.job == "page_post":
-                self._page_post(self._page_url_override)
+                url = getattr(self, "_page_url_override", "") or ""
+                if not str(url).strip():
+                    url = profile.get("active_page") or ""
+                self._page_post(url)
                 self._emit("Page posting complete.")
                 return
 
@@ -464,6 +472,29 @@ class Worker:
             except Exception:
                 pass
             self.browser = None
+
+    def _activate_active_page(self, profile):
+        """If the account has an active Page chosen, switch the whole session's
+        voice into it so every task (sync, posting, scanning, joining, page
+        posts) runs as that Page."""
+        active = str(profile.get("active_page") or "").strip()
+        if not active:
+            return
+        label = active
+        for pg in (profile.get("pages") or []):
+            if (pg.get("url") or "").strip() == active:
+                label = pg.get("name") or active
+                break
+        self._set_stage("page", label, f"Operating as your Page ({label})...")
+        self._emit(f"Switching into your Page: {label} — all tasks run as this Page.")
+        try:
+            ok = activate_page(self.browser.page, active, self._emit)
+            if not ok:
+                self._emit(
+                    f"Could not switch into the Page ({label}). Continuing as your profile."
+                )
+        except Exception as e:
+            self._emit(f"Page switch failed ({label}): {e}")
 
     # ---- discovery + approval ----
     def _scan_groups(self, keyword, filter_mode, min_members):
