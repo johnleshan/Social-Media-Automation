@@ -1,0 +1,75 @@
+name: Build & Release
+
+# Builds the installable Windows .exe on every version tag (e.g. v0.2.0) and
+# publishes it as a GitHub Release so anyone can download/update simply by
+# grabbing the installer from the Releases page.
+#
+# To cut a new release:
+#   git tag v0.2.0
+#   git push origin v0.2.0
+#
+# The workflow rebuilds the .exe from scratch on a clean Windows runner, so a
+# fresh machine never needs Python/Git set up to produce a release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build + runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r packaging/requirements-build.txt
+
+      - name: Install Inno Setup (ISCC)
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      # Derive the installer version (e.g. tag v0.2.0 -> AppVersion=0.2.0).
+      - name: Inject release version into installer
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          if (-not $ver) { $ver = '0.0.0' }
+          $iss = (Get-Content packaging/installer.iss -Raw) -replace '(?m)^AppVersion=.*', "AppVersion=$ver"
+          Set-Content packaging/installer.iss -Value $iss -Encoding UTF8
+          Write-Host "Installer AppVersion set to $ver"
+
+      - name: Build portable onedir + installer
+        shell: pwsh
+        run: |
+          ./packaging/build.ps1
+
+      - name: Verify installer exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path installer/GroupPostAutomatorSetup.exe)) {
+            Write-Error "Installer was not produced: installer/GroupPostAutomatorSetup.exe"
+            exit 1
+          }
+          Write-Host "Installer size: $((Get-Item installer/GroupPostAutomatorSetup.exe).Length) bytes"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/GroupPostAutomatorSetup.exe
+          generate_release_notes: true
