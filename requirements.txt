@@ -1,2 +1,3 @@
 playwright>=1.44.0
+psutil>=5.9.0
 ttkbootstrap>=1.10.0

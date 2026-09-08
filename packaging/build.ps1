@@ -1,4 +1,4 @@
-<# 
+﻿<# 
     One-click build script for Group Post Automator.
 
     Produces:
@@ -23,9 +23,30 @@ $ErrorActionPreference = "Stop"
 
 $ROOT   = Split-Path -Parent $MyInvocation.MyCommand.Path | Split-Path -Parent
 $VENV   = Join-Path $ROOT "venv"
-$PYTHON = Join-Path $VENV "Scripts\python.exe"
+$PYNE   = Join-Path $VENV "Scripts\python.exe"
 $PIP    = Join-Path $VENV "Scripts\pip.exe"
+
+# Resolve the interpreter: prefer the project venv, else fall back to a system
+# Python (so the one-click script also works on machines without a venv).
+if (Test-Path $PYNE) {
+    $PYTHON = $PYNE
+} else {
+    $cand = Get-Command py -ErrorAction SilentlyContinue
+    if ($cand) {
+        $PYTHON = "py -3.12"   # resolved by the shell's parser below
+    } else {
+        $PYTHON = "python"
+    }
+}
+# $PYTHON may be a multi-word launcher string; split so the call operator works.
+$PYTHON_ARGS = $PYTHON -split ' '
+$PYTHON_EXE  = $PYTHON_ARGS[0]
+$PYTHON_PRE  = if ($PYTHON_ARGS.Count -gt 1) { $PYTHON_ARGS[1..($PYTHON_ARGS.Count-1)] } else { @() }
 $ISCC   = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+if (-not (Test-Path $ISCC)) {
+    # Inno Setup is often installed per-user (winget default) under LOCALAPPDATA.
+    $ISCC = Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+}
 $MARKER = Join-Path $ROOT "packaging\seed_source.txt"
 
 Write-Host ""
@@ -54,7 +75,7 @@ if ($Seed) {
 
 # ---- 1. Ensure build deps in the venv ------------------------------------------------
 Write-Host "[1/4] Installing build dependencies..."
-& $PYTHON -m pip install -q -r (Join-Path $ROOT "packaging\requirements-build.txt") --upgrade
+& $PYTHON_EXE @($PYTHON_PRE; "-m"; "pip"; "install"; "-q"; "-r"; (Join-Path $ROOT "packaging\requirements-build.txt"); "--upgrade")
 
 # ---- 2. Generate icon if packaging\app.ico is missing --------------------------------
 $ICO = Join-Path $ROOT "packaging\app.ico"
@@ -76,7 +97,7 @@ img.save("packaging/app.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(12
 '@
     Set-Content -Path "$env:TEMP\mkicon.ps1.py" -Value $ICOScript -Encoding UTF8
     Push-Location $ROOT
-    & $PYTHON "$env:TEMP\mkicon.ps1.py"
+    & $PYTHON_EXE @($PYTHON_PRE; "$env:TEMP\mkicon.ps1.py")
     Pop-Location
 } else {
     Write-Host "[2/4] Icon exists."
@@ -84,7 +105,7 @@ img.save("packaging/app.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(12
 
 # ---- 3. Run PyInstaller ---------------------------------------------------------------
 Write-Host "[3/4] Running PyInstaller..."
-& $PYTHON -m PyInstaller --noconfirm (Join-Path $ROOT "packaging\app.spec") --distpath (Join-Path $ROOT "dist") --workpath (Join-Path $ROOT "build")
+& $PYTHON_EXE @($PYTHON_PRE; "-m"; "PyInstaller"; "--noconfirm"; (Join-Path $ROOT "packaging\app.spec"); "--distpath"; (Join-Path $ROOT "dist"); "--workpath"; (Join-Path $ROOT "build"))
 if ($LASTEXITCODE -ne 0) {
     Write-Host "PyInstaller failed (exit code $LASTEXITCODE)." -ForegroundColor Red
     exit 1

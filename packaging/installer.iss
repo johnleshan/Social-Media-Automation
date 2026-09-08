@@ -11,7 +11,9 @@ AppVersion=0.1.0
 AppPublisher=Jovesh
 DefaultDirName={localappdata}\Programs\GroupPostAutomator
 DefaultGroupName=Group Post Automator
-OutputDir=installer
+; Output is written to the project-root installer\ folder so the caller
+; (packaging/build.ps1) can find GroupPostAutomatorSetup.exe at a stable path.
+OutputDir=..\installer
 OutputBaseFilename=GroupPostAutomatorSetup
 SetupIconFile=app.ico
 Compression=lzma2/ultra64

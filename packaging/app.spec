@@ -34,6 +34,12 @@ a = Analysis(
     # web/ assets go in alongside the app package so WEB_DIR = BASE_DIR/web works
     # whether frozen (_MEIPASS/web) or running from source (project_root/web).
     datas=datas,
+    hiddenimports=[
+        # psutil is imported lazily inside functions in main.py / browser.py;
+        # force it into the bundle so the supervisor watchdog and Chrome-proc
+        # cleanup always work in the packaged build.
+        "psutil",
+    ],
     hookspath=[os.path.join(_ROOT, "packaging")],
     hooksconfig={},
     runtime_hooks=[],
