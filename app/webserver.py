@@ -33,7 +33,7 @@ from .browser import (
     _kill_chrome_on_profile,
     _clean_stale_profile_locks,
 )
-from .config import BASE_DIR, Config, is_frozen
+from .config import BASE_DIR, Config, is_frozen, resolve_media_dir
 from .database import STATUS_SAFE, STATUS_SKIP, STATUS_UNKNOWN, JOIN_NOT_JOINED, JOIN_PENDING, JOIN_JOINED, JOIN_DECLINED, Database
 from .pages import list_account_pages
 from .worker import MEDIA_EXTS, VIDEO_EXTS, Worker
@@ -188,8 +188,8 @@ class AutomationState:
         media_folder = (s.get("media_folder") or "").strip()
         media_ok = False
         if media_folder:
-            # resolve relative paths against the workspace root, same as worker
-            media_path = os.path.abspath(os.path.join(BASE_DIR, media_folder))
+            # resolve relative paths against the user-data root, same as worker
+            media_path = resolve_media_dir(media_folder)
             if os.path.isdir(media_path):
                 try:
                     media_ok = any(
@@ -206,7 +206,7 @@ class AutomationState:
 
         media_hint = media_folder or "Set a media folder in Content"
         if media_folder:
-            media_hint += f" ({os.path.abspath(os.path.join(BASE_DIR, media_folder))})"
+            media_hint += f" ({resolve_media_dir(media_folder)})"
         setup = [
             {"key": "login", "label": "Logged into Facebook", "ok": logged_ok,
              "hint": "One-time login via the opened Chrome window"},
@@ -288,7 +288,7 @@ class AutomationState:
 
     def _count_media(self):
         folder = self.config.settings.get("media_folder", "content")
-        root = os.path.abspath(os.path.join(BASE_DIR, folder))
+        root = resolve_media_dir(folder)
         n = 0
         if os.path.isdir(root):
             for _r, _dirs, names in os.walk(root):
@@ -919,7 +919,7 @@ class AutomationState:
         file name, and whether it is an image or a video.
         """
         folder = self.config.settings.get("media_folder", "content")
-        root = os.path.abspath(os.path.join(BASE_DIR, folder))
+        root = resolve_media_dir(folder)
         # Make sure the media folder exists so the composer's picker has a real,
         # browseable location — the UI currently shows an "empty folder" state
         # (no tiles to click) when the folder is missing.

@@ -5,7 +5,10 @@ accounts and settings without touching code.
 
 Path layout differs between source runs and installed (PyInstaller) runs:
 
-* source:  BASE_DIR = project root; data/profiles/content next to the code.
+* source:  BASE_DIR = project root; data/profiles/content next to the code —
+           UNLESS %LOCALAPPDATA%\\GroupPostAutomator already holds a setup
+           (from an installed build on the same machine), in which case the
+           source run reuses that root so accounts/settings are never split.
 * frozen:  BASE_DIR = read-only bundle root (web assets); all user data
            (config.json, bot.db, Chrome profiles, media) lives under
            %LOCALAPPDATA%\\GroupPostAutomator so the program folder stays writable-free.
@@ -30,12 +33,35 @@ if not _FROZEN:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Writable base for everything the user creates: config, db, profiles, content.
-USER_DATA_ROOT = BASE_DIR
-if _FROZEN:
-    USER_DATA_ROOT = os.path.join(
+def _machine_data_root():
+    """The user-data root used by installed builds (and preferred by source
+    runs on the same machine): %LOCALAPPDATA%\\GroupPostAutomator."""
+    return os.path.join(
         os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
         "GroupPostAutomator",
     )
+
+
+def _existing_machine_data_root():
+    """Return the machine-level data root only when it already holds a setup.
+
+    Source runs on a machine that also has an installed build adopt the same
+    data root, so accounts and settings are never split across two folders and
+    running ``python main.py`` next to the installed app never looks "fresh".
+    Fresh clones / other machines keep the project-local ``data/`` directory."""
+    if _FROZEN:
+        return None
+    candidate = _machine_data_root()
+    if os.path.isfile(os.path.join(candidate, "data", "config.json")):
+        return candidate
+    return None
+
+
+USER_DATA_ROOT = BASE_DIR
+if _FROZEN:
+    USER_DATA_ROOT = _machine_data_root()
+else:
+    USER_DATA_ROOT = _existing_machine_data_root() or BASE_DIR
 
 DATA_DIR = os.path.join(USER_DATA_ROOT, "data")
 PROFILES_DIR = os.path.join(USER_DATA_ROOT, "profiles")
