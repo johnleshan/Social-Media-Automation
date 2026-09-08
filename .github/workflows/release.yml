@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -68,8 +70,63 @@ jobs:
           }
           Write-Host "Installer size: $((Get-Item installer/GroupPostAutomatorSetup.exe).Length) bytes"
 
+      # Build a human-readable change log from the commits since the previous
+      # version tag, grouped by conventional-commit prefix (feat/fix/other).
+      - name: Generate release notes from commits
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          $prev = git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1
+          if (-not $prev) {
+            $prev = git rev-list --max-parents=0 HEAD
+          }
+          $lines = git log "$prev..$tag" --pretty=format:'%s'
+          $feat = [System.Collections.Generic.List[string]]::new()
+          $fix  = [System.Collections.Generic.List[string]]::new()
+          $misc = [System.Collections.Generic.List[string]]::new()
+          foreach ($l in $lines) {
+            $s = $l.Trim()
+            if ($s -match '^feat(:|\))') {
+              $s = $s -replace '^feat(\([^)]*\))?:\s*', ''
+              $feat.Add($s.TrimEnd('.'))
+            }
+            elseif ($s -match '^fix(:|\))') {
+              $s = $s -replace '^fix(\([^)]*\))?:\s*', ''
+              $fix.Add($s.TrimEnd('.'))
+            }
+            elseif ($s -match '^(build|ci|docs|chore|refactor|perf|test|style)(:|\))') {
+              continue
+            }
+            else {
+              $misc.Add($s)
+            }
+          }
+          $sb = [System.Text.StringBuilder]::new()
+          [void]$sb.AppendLine("# Group Post Automator $ver")
+          if ($feat.Count -gt 0) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Features')
+            foreach ($f in $feat) { [void]$sb.AppendLine("- $f") }
+          }
+          if ($fix.Count -gt 0) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Bug fixes')
+            foreach ($f in $fix) { [void]$sb.AppendLine("- $f") }
+          }
+          if ($misc.Count -gt 0) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Other changes')
+            foreach ($f in $misc) { [void]$sb.AppendLine("- $f") }
+          }
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine('Download **GroupPostAutomatorSetup.exe** and run it — your accounts, groups, settings and post history are preserved when upgrading.')
+          Set-Content -Path release_notes.md -Value $sb.ToString() -Encoding UTF8
+          Write-Host '--- release notes ---'
+          Get-Content release_notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: installer/GroupPostAutomatorSetup.exe
-          generate_release_notes: true
+          body_path: release_notes.md
