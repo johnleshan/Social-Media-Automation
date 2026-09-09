@@ -182,7 +182,7 @@ def _file_input(page):
     return None
 
 
-def _set_file_input(page, paths, accept_hint=""):
+def _set_file_input(page, paths, accept_hint="", anchor=None):
     """Attach media files of ANY size to the composer's file input.
 
     Playwright's set_input_files falls back to base64 transfer on a
@@ -192,12 +192,32 @@ def _set_file_input(page, paths, accept_hint=""):
     local file paths straight through the CDP DOM domain reads them from disk
     and has no size cap.
 
-    Selects the input the same way the Playwright locators do: prefer one
-    inside a dialog that accepts the target type, then any dialog input, then
-    the first file input in document order. Returns the number of file inputs
-    found (via CDP), or None when CDP was unavailable / no input exists (the
-    caller falls back to set_input_files, whose 50MB cap still applies there).
+    The target input is CRITICAL: Facebook keeps several hidden file inputs on
+    a feed page (comment boxes, photo/video areas) whose accept/attrs are
+    identical to the composer's. Setting files on the wrong one uploads
+    nothing and the composer never becomes ready. The caller's ``anchor`` is
+    the element already picked with Playwright's own rules (`_file_input`:
+    visible first, then inside a visible dialog) — the same element the
+    historical set_input_files path used — so this function targets exactly
+    that element via CDP. When no anchor is given, it falls back to a CDP scan
+    ranked (accept match, inside a dialog, visible, document order). In every
+    case the file is delivered by CDP so larger-than-50MB media works.
+
+    Returns the number of file inputs found (via CDP), or None when CDP was
+    unavailable / no input exists (the caller falls back to set_input_files,
+    whose 50MB cap still applies there).
     """
+    ANCHOR_ATTR = "data-sm-attach-target"
+    if anchor is not None:
+        try:
+            anchor.evaluate(
+                "() => { document.querySelectorAll('[data-sm-attach-target]')"
+                ".forEach(el => el.removeAttribute('data-sm-attach-target')); }"
+            )
+            anchor.evaluate("el => { el.setAttribute('data-sm-attach-target', '1'); }")
+        except Exception:
+            anchor = None
+
     def _walk(node, out, in_dialog):
         attrs = node.get("attributes") or []
         pair = {}
@@ -210,6 +230,7 @@ def _set_file_input(page, paths, accept_hint=""):
                 "nodeId": node["nodeId"],
                 "in_dialog": now_dialog,
                 "accept": (pair.get("accept") or "").lower(),
+                "anchored": anchor is not None and pair.get(ANCHOR_ATTR) is not None,
                 "order": len(out),
             })
         for child in node.get("children") or []:
@@ -228,16 +249,40 @@ def _set_file_input(page, paths, accept_hint=""):
     hint = (accept_hint or "").lower()
 
     def rank(i):
+        anchored = 0 if i["anchored"] else 1
         accept_ok = 0 if (not hint or hint in i["accept"]) else 1
         dialog = 0 if i["in_dialog"] else 1
-        return (accept_ok, dialog, i["order"])
+        return (anchored, accept_ok, dialog, i["order"])
 
     target = min(found, key=rank)
     try:
         sess.send("DOM.setFileInputFiles", {"nodeId": target["nodeId"], "files": list(paths)})
     except Exception:
         return None
+    finally:
+        if anchor is not None:
+            try:
+                anchor.evaluate("el => { el.removeAttribute('data-sm-attach-target'); }")
+            except Exception:
+                pass
     return len(found)
+
+
+def _upload_wait_seconds(paths):
+    """How long to wait for a media upload to land, scaled by total file size.
+
+    Small images finish almost instantly; multi-hundred-MB videos can take
+    minutes to upload and then process. The wait is generous because the
+    loop exits as soon as the composer becomes ready — a long budget only
+    matters when the upload is genuinely slow.
+    """
+    total_mb = 0.0
+    for p in (paths or []):
+        try:
+            total_mb += os.path.getsize(p) / (1024 * 1024)
+        except OSError:
+            pass
+    return min(300, max(90, int(90 + total_mb * 1.5)))
 
 
 def _upload_file(page, file_path, log):
@@ -266,24 +311,23 @@ def _upload_file(page, file_path, log):
         if input_el is None:
             log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
             raise RuntimeError("no visible file input appeared")
-    if _set_file_input(page, paths) is None:
+    if _set_file_input(page, paths, anchor=input_el) is None:
         input_el.set_input_files(paths)
     log(f"file(s) attached ({len(paths)}), waiting for upload...")
-    # Wait for a preview/processing UI to appear, then settle.
-    timeout = 90 if len(paths) > 1 else 60
-    for _ in range(timeout):
+    # The caption field ("Say something about this photo/video…") appears once
+    # the media actually lands in the composer. Check for it FIRST so a
+    # lingering server-side "Processing…" hint (videos process after upload)
+    # can never mask a completed upload. Only when no caption appears for the
+    # whole (size-scaled) budget do we treat the upload as failed.
+    wait_secs = _upload_wait_seconds(paths)
+    for _ in range(wait_secs):
         page.wait_for_timeout(1000)
-        body = _safe_text(page)
-        low = body.lower()
-        if "processing" in low or "uploading" in low:
-            continue
-        if "error" in low and "couldn't upload" in low:
-            raise RuntimeError("upload failed (couldn't upload message)")
-        # Preview container appears once uploaded.
         if _has_caption_field(page):
             return True
-    # Give it one more generous window for videos.
-    page.wait_for_timeout(5000)
+        low = _safe_text(page).lower()
+        if "error" in low and "couldn't upload" in low:
+            raise RuntimeError("upload failed (couldn't upload message)")
+    log(f"[diag] upload did not complete in {wait_secs}s; dialogs: {_visible_dialogs_text(page, 1500)}")
     return _has_caption_field(page)
 
 
@@ -936,32 +980,53 @@ def _click_page_media(page, log):
 def _upload_page_file(page, file_path, log):
     """Set the media file on the modal's file input and wait for the preview.
 
-    Chooses an input that accepts the file type (image vs video) when possible,
-    otherwise falls back to any visible file input in the composer dialog.
+    Chooses the input with Playwright's location rules first (accept-matched
+    input inside the composer dialog, else any visible one) and delivers the
+    file through CDP so media of any size attaches; the chosen element is
+    handed to _set_file_input as the anchor so the CDP injection targets the
+    exact same input (never a hidden comment-box twin).
     """
     ext = os.path.splitext(file_path)[1].lower()
     is_video = ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".3gp")
     accept_hint = "video" if is_video else "image"
+    inp = None
     try:
-        if _set_file_input(page, [file_path], accept_hint) is None:
-            inp = page.locator(f'{DIALOG} input[type="file"][accept*="{accept_hint}"]').first
-            inp.set_input_files(file_path, timeout=20000)
+        cand = page.locator(f'{DIALOG} input[type="file"][accept*="{accept_hint}"]').first
+        if cand.count() and cand.is_visible(timeout=600):
+            inp = cand
+    except Exception:
+        inp = None
+    if inp is None:
+        try:
+            cand = page.locator(f'{DIALOG} input[type="file"]:visible').first
+            if cand.count() and cand.is_visible(timeout=600):
+                inp = cand
+        except Exception:
+            inp = None
+    try:
+        if _set_file_input(page, [file_path], accept_hint, anchor=inp) is None:
+            target = inp
+            if target is None:
+                target = page.locator(f'{DIALOG} input[type="file"]:visible').last
+            target.set_input_files(file_path, timeout=20000)
     except Exception:
         try:
-            inp = page.locator(f'{DIALOG} input[type="file"]:visible').last
-            inp.set_input_files(file_path, timeout=20000)
+            target = page.locator(f'{DIALOG} input[type="file"]:visible').last
+            target.set_input_files(file_path, timeout=20000)
         except Exception as e:
             raise RuntimeError(f"could not attach page media: {e}")
     log("page file attached, waiting for preview...")
-    for _ in range(60):
+    # "Edit" appears once a photo/video is attached in the modal; scaled budget
+    # because large videos can take a while to upload.
+    wait_secs = _upload_wait_seconds([file_path])
+    for _ in range(wait_secs):
         page.wait_for_timeout(1000)
-        body = _safe_text(page).lower()
-        # "Edit" appears once a photo/video is attached in the modal
-        if re.search(r"\bedit\b", body):
+        if re.search(r"\bedit\b", _safe_text(page).lower()):
             page.wait_for_timeout(1500)
             return True
-        if "couldn't upload" in body:
+        if "couldn't upload" in _safe_text(page).lower():
             raise RuntimeError("page upload failed (couldn't upload)")
+    log(f"[diag] page upload did not complete in {wait_secs}s; dialogs: {_visible_dialogs_text(page, 1500)}")
     return False
 
 
