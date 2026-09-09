@@ -1,20 +1,28 @@
 ; Inno Setup script for Group Post Automator.
 ; Produces a per-user installer that requires no admin rights.
-; Build:
+; Build (pass the version + app exe name):
 ;   1. venv\Scripts\pyinstaller packaging\app.spec --noconfirm
-;   2. "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+;   2. "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss /DMyVer=2.0.0 /DAppExe=GroupPostAutomator-v2.0.0.exe
+; packaging/build.ps1 does both steps automatically.
+
+#ifndef MyVer
+#define MyVer "0.0.0"
+#endif
+#ifndef AppExe
+#define AppExe "GroupPostAutomator.exe"
+#endif
 
 [Setup]
 AppId={{C8D5D0A0-B2C4-4D8B-9F0B-3A2A8C0E4F0C}
 AppName=Group Post Automator
-AppVersion=2.0.0
+AppVersion={#MyVer}
 AppPublisher=Jovesh
 DefaultDirName={localappdata}\Programs\GroupPostAutomator
 DefaultGroupName=Group Post Automator
 ; Output is written to the project-root installer\ folder so the caller
-; (packaging/build.ps1) can find GroupPostAutomatorSetup.exe at a stable path.
+; (packaging/build.ps1) can find GroupPostAutomatorSetup-v<ver>.exe at a stable path.
 OutputDir=..\installer
-OutputBaseFilename=GroupPostAutomatorSetup
+OutputBaseFilename=GroupPostAutomatorSetup-v{#MyVer}
 SetupIconFile=app.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -33,14 +41,14 @@ Name: "startmenuicon"; Description: "Create a &Start Menu shortcut"; GroupDescri
 
 [Files]
 ; Copy the entire onedir build output into the install folder.
-Source: "..\dist\GroupPostAutomator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\GroupPostAutomator-v{#MyVer}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Group Post Automator"; Filename: "{app}\GroupPostAutomator.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\Group Post Automator"; Filename: "{app}\GroupPostAutomator.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\Group Post Automator"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"
+Name: "{autodesktop}\Group Post Automator"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\GroupPostAutomator.exe"; Description: "Launch Group Post Automator now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "Launch Group Post Automator now"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // ---- Chrome / Edge presence check ------------------------------------------------
@@ -82,7 +90,7 @@ procedure KillGroupPostAutomator;
 var
   ResultCode: Integer;
 begin
-  Exec(ExpandConstant('{cmd}'), '/c taskkill /F /IM GroupPostAutomator.exe',
+  Exec(ExpandConstant('{cmd}'), '/c taskkill /F /IM GroupPostAutomator*.exe /T',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
@@ -99,8 +107,12 @@ end;
 // removes or resets it. We detect an existing install and say so explicitly so
 // nobody uninstalls first expecting a "clean" upgrade.
 function IsUpgrade: Boolean;
+var
+  AFile: TFindRec;
 begin
-  Result := FileExists(ExpandConstant('{app}\GroupPostAutomator.exe'));
+  Result := FindFirst(ExpandConstant('{app}\GroupPostAutomator*.exe'), AFile);
+  if Result then
+    FindClose(AFile);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

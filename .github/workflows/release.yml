@@ -45,30 +45,30 @@ jobs:
         shell: pwsh
         run: choco install innosetup --yes --no-progress
 
-      # Derive the installer version (e.g. tag v0.2.0 -> AppVersion=0.2.0).
-      - name: Inject release version into installer
+      # Derive the version once (e.g. tag v2.0.2 -> 2.0.2) and export it so the
+      # build, verification and release steps can name their artifacts with it.
+      - name: Derive release version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $ver = $tag.TrimStart('v')
+          $ver = "${{ github.ref_name }}".TrimStart('v')
           if (-not $ver) { $ver = '0.0.0' }
-          $iss = (Get-Content packaging/installer.iss -Raw) -replace '(?m)^AppVersion=.*', "AppVersion=$ver"
-          Set-Content packaging/installer.iss -Value $iss -Encoding UTF8
-          Write-Host "Installer AppVersion set to $ver"
+          "VERSION=$ver" >> $env:GITHUB_ENV
+          Write-Host "Release version: $ver"
 
       - name: Build portable onedir + installer
         shell: pwsh
         run: |
-          ./packaging/build.ps1
+          ./packaging/build.ps1 -Version $env:VERSION
 
       - name: Verify installer exists
         shell: pwsh
         run: |
-          if (-not (Test-Path installer/GroupPostAutomatorSetup.exe)) {
-            Write-Error "Installer was not produced: installer/GroupPostAutomatorSetup.exe"
+          $exe = "installer/GroupPostAutomatorSetup-v$env:VERSION.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Installer was not produced: $exe"
             exit 1
           }
-          Write-Host "Installer size: $((Get-Item installer/GroupPostAutomatorSetup.exe).Length) bytes"
+          Write-Host "Installer size: $((Get-Item $exe).Length) bytes"
 
       # Build a human-readable change log from the commits since the previous
       # version tag, grouped by conventional-commit prefix (feat/fix/other).
@@ -76,7 +76,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $ver = $tag.TrimStart('v')
+          $ver = $env:VERSION
           $prev = git tag --sort=-v:refname | Where-Object { $_ -ne $tag } | Select-Object -First 1
           if (-not $prev) {
             $prev = git rev-list --max-parents=0 HEAD
@@ -120,7 +120,7 @@ jobs:
             foreach ($f in $misc) { [void]$sb.AppendLine("- $f") }
           }
           [void]$sb.AppendLine('')
-          [void]$sb.AppendLine('Download **GroupPostAutomatorSetup.exe** and run it — your accounts, groups, settings and post history are preserved when upgrading.')
+          [void]$sb.AppendLine("Download **GroupPostAutomatorSetup-v$ver.exe** and run it — your accounts, groups, settings and post history are preserved when upgrading.")
           Set-Content -Path release_notes.md -Value $sb.ToString() -Encoding UTF8
           Write-Host '--- release notes ---'
           Get-Content release_notes.md
@@ -128,5 +128,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: installer/GroupPostAutomatorSetup.exe
+          files: installer/GroupPostAutomatorSetup-v${{ env.VERSION }}.exe
           body_path: release_notes.md

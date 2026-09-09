@@ -1,9 +1,13 @@
 ﻿<# 
     One-click build script for Group Post Automator.
 
-    Produces:
-        dist\GroupPostAutomator\GroupPostAutomator.exe    (portable onedir)
-        installer\GroupPostAutomatorSetup.exe              (Inno Setup installer, if ISCC is available)
+    Produces (names carry the version so you always know which build you have):
+        dist\GroupPostAutomator-v<ver>\GroupPostAutomator-v<ver>.exe  (portable onedir)
+        installer\GroupPostAutomatorSetup-v<ver>.exe                   (Inno Setup installer, if ISCC is available)
+
+    -Version <ver>  Sets the version encoded into the artifact/file names and the
+                    installer's AppVersion. When omitted, the latest git tag is
+                    used (or 0.0.0 outside a repo).
 
     Requirements (auto-installed into the project venv if missing):
         - Python 3.10+ (venv at project root)
@@ -16,7 +20,8 @@
           winget is available; otherwise it prints manual instructions.
 #>
 param(
-    [string]$Seed = ""
+    [string]$Seed = "",
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,9 +54,25 @@ if (-not (Test-Path $ISCC)) {
 }
 $MARKER = Join-Path $ROOT "packaging\seed_source.txt"
 
+# ---- Version resolution -------------------------------------------------
+# Used in artifact/file names and the installer's AppVersion. Prefer the
+# explicit -Version; fall back to the latest git tag; last resort 0.0.0.
+if ($Version) {
+    $VER = $Version.TrimStart("v")
+} else {
+    $tag = & git describe --tags --abbrev=0 2>$null
+    if ($LASTEXITCODE -eq 0 -and $tag) { $VER = $tag.TrimStart("v") } else { $VER = "0.0.0" }
+}
+if ($VER -eq "" -or $VER -match '[^0-9a-zA-Z.\-]') {
+    Write-Host "Invalid version string: '$Version'" -ForegroundColor Red
+    exit 1
+}
+$APPEXE = "GroupPostAutomator-v$VER.exe"
+$INSTALLER_NAME = "GroupPostAutomatorSetup-v$VER.exe"
+
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Group Post Automator  —  Build"
+Write-Host "  Group Post Automator  —  Build  (v$VER)"
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -112,8 +133,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 $EXE = Join-Path $ROOT "dist\GroupPostAutomator\GroupPostAutomator.exe"
 if (Test-Path $EXE) {
-    $sizeMB = [math]::Round((Get-Item $EXE).Length / 1MB, 1)
-    Write-Host "Portable build ready: dist\GroupPostAutomator\  ($sizeMB MB exe)" -ForegroundColor Green
+    # Rename the portable build so its folder + launcher carry the version.
+    $PORTABLE_DIR = Join-Path $ROOT "dist\GroupPostAutomator-v$VER"
+    if (Test-Path $PORTABLE_DIR) { Remove-Item $PORTABLE_DIR -Recurse -Force }
+    Rename-Item (Join-Path $ROOT "dist\GroupPostAutomator") "GroupPostAutomator-v$VER"
+    Rename-Item (Join-Path $PORTABLE_DIR "GroupPostAutomator.exe") $APPEXE
+    $sizeMB = [math]::Round((Get-Item (Join-Path $PORTABLE_DIR $APPEXE)).Length / 1MB, 1)
+    Write-Host "Portable build ready: dist\GroupPostAutomator-v$VER\  ($sizeMB MB exe)" -ForegroundColor Green
 } else {
     Write-Host "Build output missing — $EXE" -ForegroundColor Red
     exit 1
@@ -137,14 +163,14 @@ if (-not (Test-Path $ISCC)) {
 }
 
 if (Test-Path $ISCC) {
-    & $ISCC (Join-Path $ROOT "packaging\installer.iss")
+    & $ISCC (Join-Path $ROOT "packaging\installer.iss") "/DMyVer=$VER" "/DAppExe=$APPEXE"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Inno Setup build failed (exit code $LASTEXITCODE)." -ForegroundColor Yellow
     } else {
-        $INSTALLER = Join-Path $ROOT "installer\GroupPostAutomatorSetup.exe"
+        $INSTALLER = Join-Path $ROOT "installer\$INSTALLER_NAME"
         if (Test-Path $INSTALLER) {
             $iMB = [math]::Round((Get-Item $INSTALLER).Length / 1MB, 1)
-            Write-Host "Installer ready: installer\GroupPostAutomatorSetup.exe  ($iMB MB)" -ForegroundColor Green
+            Write-Host "Installer ready: installer\$INSTALLER_NAME  ($iMB MB)" -ForegroundColor Green
         }
     }
 } else {
@@ -155,7 +181,7 @@ if (Test-Path $ISCC) {
     Write-Host "  1. Install Inno Setup 6: winget install JRSoftware.InnoSetup"
     Write-Host "  2. Open packaging\installer.iss in the Inno Setup IDE"
     Write-Host "  3. Press Build > Compile"
-    Write-Host "  4. The installer appears in: installer\GroupPostAutomatorSetup.exe"
+    Write-Host "  4. The installer appears in: installer\$INSTALLER_NAME"
     Write-Host "-------------------------------------------------------------"
 }
 
@@ -163,6 +189,6 @@ Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Build complete!"
 Write-Host ""
-Write-Host "  Portable (no install):  dist\GroupPostAutomator\GroupPostAutomator.exe"
-Write-Host "  Installer (if built):   installer\GroupPostAutomatorSetup.exe"
+Write-Host "  Portable (no install):  dist\GroupPostAutomator-v$VER\$APPEXE"
+Write-Host "  Installer (if built):   installer\$INSTALLER_NAME"
 Write-Host "============================================" -ForegroundColor Cyan
