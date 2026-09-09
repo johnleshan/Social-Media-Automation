@@ -182,6 +182,64 @@ def _file_input(page):
     return None
 
 
+def _set_file_input(page, paths, accept_hint=""):
+    """Attach media files of ANY size to the composer's file input.
+
+    Playwright's set_input_files falls back to base64 transfer on a
+    connect_over_cdp connection, and Chromium caps that at ~50MB per file
+    ("Cannot transfer files larger than 50Mb to a browser not co-located with
+    the server"), so large videos can never attach. Injecting the existing
+    local file paths straight through the CDP DOM domain reads them from disk
+    and has no size cap.
+
+    Selects the input the same way the Playwright locators do: prefer one
+    inside a dialog that accepts the target type, then any dialog input, then
+    the first file input in document order. Returns the number of file inputs
+    found (via CDP), or None when CDP was unavailable / no input exists (the
+    caller falls back to set_input_files, whose 50MB cap still applies there).
+    """
+    def _walk(node, out, in_dialog):
+        attrs = node.get("attributes") or []
+        pair = {}
+        for i in range(0, len(attrs) - 1, 2):
+            pair[attrs[i]] = attrs[i + 1]
+        role = (pair.get("role") or "").lower()
+        now_dialog = in_dialog or role == "dialog"
+        if (node.get("nodeName") or "").upper() == "INPUT" and (pair.get("type") or "").lower() == "file":
+            out.append({
+                "nodeId": node["nodeId"],
+                "in_dialog": now_dialog,
+                "accept": (pair.get("accept") or "").lower(),
+                "order": len(out),
+            })
+        for child in node.get("children") or []:
+            _walk(child, out, now_dialog)
+
+    try:
+        sess = page.context.new_cdp_session(page)
+        sess.send("DOM.enable")
+        doc = sess.send("DOM.getDocument", {"depth": -1})
+    except Exception:
+        return None
+    found = []
+    _walk(doc.get("root") or {}, found, False)
+    if not found:
+        return None
+    hint = (accept_hint or "").lower()
+
+    def rank(i):
+        accept_ok = 0 if (not hint or hint in i["accept"]) else 1
+        dialog = 0 if i["in_dialog"] else 1
+        return (accept_ok, dialog, i["order"])
+
+    target = min(found, key=rank)
+    try:
+        sess.send("DOM.setFileInputFiles", {"nodeId": target["nodeId"], "files": list(paths)})
+    except Exception:
+        return None
+    return len(found)
+
+
 def _upload_file(page, file_path, log):
     """Attach one or more media files. file_path can be a string or a list
     of strings. Returns True when upload completes."""
@@ -208,7 +266,8 @@ def _upload_file(page, file_path, log):
         if input_el is None:
             log(f"[diag] dialogs: {_visible_dialogs_text(page)}")
             raise RuntimeError("no visible file input appeared")
-    input_el.set_input_files(paths)
+    if _set_file_input(page, paths) is None:
+        input_el.set_input_files(paths)
     log(f"file(s) attached ({len(paths)}), waiting for upload...")
     # Wait for a preview/processing UI to appear, then settle.
     timeout = 90 if len(paths) > 1 else 60
@@ -884,8 +943,9 @@ def _upload_page_file(page, file_path, log):
     is_video = ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".wmv", ".3gp")
     accept_hint = "video" if is_video else "image"
     try:
-        inp = page.locator(f'{DIALOG} input[type="file"][accept*="{accept_hint}"]').first
-        inp.set_input_files(file_path, timeout=20000)
+        if _set_file_input(page, [file_path], accept_hint) is None:
+            inp = page.locator(f'{DIALOG} input[type="file"][accept*="{accept_hint}"]').first
+            inp.set_input_files(file_path, timeout=20000)
     except Exception:
         try:
             inp = page.locator(f'{DIALOG} input[type="file"]:visible').last
