@@ -71,7 +71,10 @@ jobs:
           Write-Host "Installer size: $((Get-Item $exe).Length) bytes"
 
       # Build a human-readable change log from the commits since the previous
-      # version tag, grouped by conventional-commit prefix (feat/fix/other).
+      # version tag, grouped by conventional-commit prefix (feat/fix/misc), with
+      # tooling-only commits (build/ci/docs/chore/refactor/perf/test/style) shown
+      # under "Maintenance & tooling" instead of being dropped, so the notes are
+      # never empty or generic.
       - name: Generate release notes from commits
         shell: pwsh
         run: |
@@ -82,21 +85,24 @@ jobs:
             $prev = git rev-list --max-parents=0 HEAD
           }
           $lines = git log "$prev..$tag" --pretty=format:'%s'
-          $feat = [System.Collections.Generic.List[string]]::new()
-          $fix  = [System.Collections.Generic.List[string]]::new()
-          $misc = [System.Collections.Generic.List[string]]::new()
+          $feat  = [System.Collections.Generic.List[string]]::new()
+          $fix   = [System.Collections.Generic.List[string]]::new()
+          $maint = [System.Collections.Generic.List[string]]::new()
+          $misc  = [System.Collections.Generic.List[string]]::new()
           foreach ($l in $lines) {
             $s = $l.Trim()
-            if ($s -match '^feat(:|\))') {
+            if ($s -match '^feat(\(|:)') {
               $s = $s -replace '^feat(\([^)]*\))?:\s*', ''
               $feat.Add($s.TrimEnd('.'))
             }
-            elseif ($s -match '^fix(:|\))') {
+            elseif ($s -match '^fix(\(|:)') {
               $s = $s -replace '^fix(\([^)]*\))?:\s*', ''
               $fix.Add($s.TrimEnd('.'))
             }
-            elseif ($s -match '^(build|ci|docs|chore|refactor|perf|test|style)(:|\))') {
-              continue
+            elseif ($s -match '^(build|ci|docs|chore|refactor|perf|test|style)(\(|:)') {
+              $s = $s -replace '^(build|ci|docs|chore|refactor|perf|test|style)(\([^)]*\))?:\s*', ''
+              if ($s) { $maint.Add($s.TrimEnd('.')) }
+              else { $maint.Add($l.Trim()) }
             }
             else {
               $misc.Add($s)
@@ -104,20 +110,35 @@ jobs:
           }
           $sb = [System.Text.StringBuilder]::new()
           [void]$sb.AppendLine("# Group Post Automator $ver")
+          $added = $false
           if ($feat.Count -gt 0) {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine('## Features')
             foreach ($f in $feat) { [void]$sb.AppendLine("- $f") }
+            $added = $true
           }
           if ($fix.Count -gt 0) {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine('## Bug fixes')
             foreach ($f in $fix) { [void]$sb.AppendLine("- $f") }
+            $added = $true
+          }
+          if ($maint.Count -gt 0) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Maintenance & tooling')
+            foreach ($f in $maint) { [void]$sb.AppendLine("- $f") }
+            $added = $true
           }
           if ($misc.Count -gt 0) {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine('## Other changes')
             foreach ($f in $misc) { [void]$sb.AppendLine("- $f") }
+            $added = $true
+          }
+          if (-not $added) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine('## Other changes')
+            [void]$sb.AppendLine('- Minor fixes and improvements.')
           }
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine("Download **GroupPostAutomatorSetup-v$ver.exe** and run it — your accounts, groups, settings and post history are preserved when upgrading.")
